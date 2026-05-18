@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --font-sans: "Outfit", sans-serif;
+}
+
+:root {
+  --bg-gradient-light: radial-gradient(at 0% 0%, hsla(160, 100%, 96%, 1) 0px, transparent 50%),
+                       radial-gradient(at 100% 0%, hsla(160, 100%, 98%, 1) 0px, transparent 50%),
+                       radial-gradient(at 100% 100%, hsla(160, 40%, 94%, 1) 0px, transparent 50%),
+                       radial-gradient(at 0% 100%, hsla(160, 100%, 98%, 1) 0px, transparent 50%);
+  
+  --bg-gradient-dark: radial-gradient(at 0% 0%, hsla(160, 50%, 10%, 1) 0px, transparent 50%),
+                      radial-gradient(at 100% 0%, hsla(160, 30%, 8%, 1) 0px, transparent 50%),
+                      radial-gradient(at 100% 100%, hsla(160, 80%, 5%, 1) 0px, transparent 50%),
+                      radial-gradient(at 0% 100%, hsla(160, 40%, 6%, 1) 0px, transparent 50%);
+}
+
+* {
+  border-color: theme(--color-gray-200);
+  font-family: 'Outfit', sans-serif;
+}
+.dark * {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #f8fafc;
+  background-image: var(--bg-gradient-light);
+  background-attachment: fixed;
+  color: #0f172a;
+}
+
+.dark body {
+  background-color: #0B1120;
+  background-image: var(--bg-gradient-dark);
+  color: #f8fafc;
+}
+
+/* Glassmorphism utility */
+.glass {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.dark .glass {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.2);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.4);
+}
