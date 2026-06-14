@@ -1,6 +1,6 @@
 # Sri Panchakanya Community Forest Management System
 
-A React + Go + PostgreSQL application for digitizing the member register and managing the operational and financial records of **श्री पाञ्चकन्या सामुदायिक वन उपभोक्ता समूह**.
+A React + Go + PostgreSQL application for digitizing the member register and managing the operational and financial records of **Community-Forest**.
 
 ## Project structure
 
