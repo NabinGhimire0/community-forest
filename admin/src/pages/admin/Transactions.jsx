@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useSelector } from "react-redux";
 import {
   Search,
@@ -32,6 +32,10 @@ import {
 import LoadingSpinner from "../../components/common/LoadingSpinner";
 import { useToast } from "../../components/common/Toast";
 import { formatCurrency, formatDate } from "../../utils/helpers";
+import {
+  buildFiscalYearOptions,
+  getActiveFiscalYearId,
+} from "../../utils/fiscalYears";
 
 export default function Transactions() {
   const { user } = useSelector((state) => state.auth);
@@ -53,7 +57,7 @@ export default function Transactions() {
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [fiscalYearFilter, setFiscalYearFilter] = useState("");
-  const [activeTab, setActiveTab] = useState("all");
+  const [activeTab, setActiveTab] = useState(isMember ? "my" : "all");
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [refreshing, setRefreshing] = useState(false);
@@ -64,22 +68,29 @@ export default function Transactions() {
   const fetchMasterData = useCallback(async () => {
     try {
       const res = await api.getFiscalYears();
-      if (res.success) setFiscalYears(res.data || []);
+      if (res.success) {
+        const years = res.data || [];
+        setFiscalYears(years);
+        if (!isMember) {
+          setFiscalYearFilter(
+            (current) => current || getActiveFiscalYearId(years),
+          );
+        }
+      }
     } catch (err) {
       console.error("Failed to fetch fiscal years:", err);
     }
-  }, []);
+  }, [isMember]);
 
   const fetchTransactions = useCallback(async () => {
     setIsLoading(true);
     try {
-      const fetchFn =
-        activeTab === "my" && isMember
-          ? api.getMyTransactions.bind(api)
-          : api.getTransactions.bind(api);
+      const fetchFn = isMember
+        ? api.getMyTransactions.bind(api)
+        : api.getTransactions.bind(api);
       const res = await fetchFn({
         page,
-        limit: 10,
+        per_page: isMember ? 100 : 10,
         search: search || undefined,
         type: typeFilter || undefined,
         fiscal_year_id: fiscalYearFilter || undefined,
@@ -88,7 +99,7 @@ export default function Transactions() {
         setTransactions(res.data || []);
         setTotalPages(res.meta?.total_pages || 1);
       }
-    } catch (err) {
+    } catch (_err) {
       addToast("Failed to load transactions", "error");
     } finally {
       setIsLoading(false);
@@ -99,7 +110,6 @@ export default function Transactions() {
     search,
     typeFilter,
     fiscalYearFilter,
-    activeTab,
     isMember,
     addToast,
   ]);
@@ -131,10 +141,28 @@ export default function Transactions() {
     setShowViewModal(true);
   };
 
-  const tabs = [
-    { id: "all", label: "All Transactions" },
-    ...(isMember ? [{ id: "my", label: "My Transactions" }] : []),
-  ];
+  const visibleTransactions = useMemo(() => {
+    if (!isMember) return transactions;
+    const term = search.trim().toLowerCase();
+    return transactions.filter((transaction) => {
+      const searchable = [
+        transaction.id,
+        transaction.receipt_no,
+        transaction.type,
+        transaction.resource_item?.name,
+      ]
+        .filter((value) => value != null)
+        .join(" ")
+        .toLowerCase();
+      const matchesSearch = !term || searchable.includes(term);
+      const matchesType = !typeFilter || transaction.type === typeFilter;
+      return matchesSearch && matchesType;
+    });
+  }, [isMember, transactions, search, typeFilter]);
+
+  const tabs = isMember
+    ? [{ id: "my", label: "My Transactions" }]
+    : [{ id: "all", label: "All Transactions" }];
 
   return (
     <div className="space-y-6">
@@ -142,10 +170,10 @@ export default function Transactions() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-            Transactions
+            {isMember ? "My Ledger" : "Transactions"}
           </h1>
           <p className="text-sm text-gray-500 dark:text-gray-400">
-            View complete financial ledger
+            {isMember ? "Review your charges, payments and receipts" : "View complete financial ledger"}
           </p>
         </div>
         <div className="flex gap-2">
@@ -257,7 +285,8 @@ export default function Transactions() {
       <Card>
         <CardContent className="p-4">
           <div className="flex flex-col sm:flex-row gap-3">
-            <div className="flex gap-1 bg-gray-100 dark:bg-gray-800/50 rounded-lg p-1">
+            {tabs.length > 1 && (
+              <div className="flex gap-1 bg-gray-100 dark:bg-gray-800/50 rounded-lg p-1">
               {tabs.map((tab) => (
                 <button
                   key={tab.id}
@@ -274,7 +303,8 @@ export default function Transactions() {
                   {tab.label}
                 </button>
               ))}
-            </div>
+              </div>
+            )}
             <div className="flex-1 relative">
               <Search
                 size={16}
@@ -311,13 +341,9 @@ export default function Transactions() {
                   setFiscalYearFilter(e.target.value);
                   setPage(1);
                 }}
-                options={[
-                  { value: "", label: "Select Fiscal Year" },
-                  ...fiscalYears.map((fy) => ({
-                    value: String(fy.id),
-                    label: fy.name,
-                  })),
-                ]}
+                options={buildFiscalYearOptions(fiscalYears, {
+                  includeAll: true,
+                })}
                 className="w-40"
               />
             )}
@@ -330,7 +356,7 @@ export default function Transactions() {
         <CardContent className="p-0">
           {isLoading ? (
             <LoadingSpinner text="Loading transactions..." />
-          ) : transactions.length === 0 ? (
+          ) : visibleTransactions.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-gray-400">
               <BookOpen size={48} className="mb-3 opacity-30" />
               <p className="text-lg font-medium">No transactions found</p>
@@ -357,7 +383,7 @@ export default function Transactions() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {transactions.map((txn) => (
+                  {visibleTransactions.map((txn) => (
                     <TableRow key={txn.id}>
                       <TableCell className="font-mono text-xs font-medium">
                         {txn.receipt_no}

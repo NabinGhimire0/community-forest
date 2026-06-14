@@ -1,50 +1,43 @@
 package utils
 
 import (
-	"fmt"
+	"errors"
+	"strings"
+
 	"forest-management/config"
 )
 
-// SMSService is an interface — you can swap providers without changing business logic
 type SMSService interface {
 	SendSMS(phone string, message string) error
 }
 
-// SparrowSMS implements SMSService for Nepal's Sparrow SMS
+type DisabledSMS struct{}
+
+func (DisabledSMS) SendSMS(string, string) error {
+	return errors.New("SMS delivery is not configured")
+}
+
+// SparrowSMS intentionally refuses to claim delivery until the official API
+// integration is configured and tested. It never prints credentials/messages.
 type SparrowSMS struct {
 	APIKey   string
 	SenderID string
 }
 
-func NewSparrowSMS(apiKey, senderID string) *SparrowSMS {
-	return &SparrowSMS{APIKey: apiKey, SenderID: senderID}
-}
-
 func (s *SparrowSMS) SendSMS(phone string, message string) error {
-	// Sparrow SMS API implementation
-	// In production, use net/http to POST to their endpoint
-	fmt.Printf("📱 SMS sent to %s: %s\n", phone, message)
-	// Actual API call would look like:
-	// resp, err := http.PostForm("https://api.sparrowsms.com/v2/sms/",
-	//     url.Values{
-	//         "token":    {s.APIKey},
-	//         "from":     {s.SenderID},
-	//         "to":       {phone},
-	//         "text":     {message},
-	//     })
-	return nil
+	if strings.TrimSpace(s.APIKey) == "" || strings.TrimSpace(phone) == "" || strings.TrimSpace(message) == "" {
+		return errors.New("SMS delivery is not configured")
+	}
+	return errors.New("Sparrow SMS transport is not implemented; temporary credentials were not sent")
 }
 
-// GetSMSService returns the configured SMS provider
 func GetSMSService() SMSService {
-	cfg := config.AppConfig // import "forest-management/config"
-	switch cfg.SMSProvider {
-	case "sparrow":
-		return NewSparrowSMS(cfg.SMSAPIKey, cfg.SMSSenderID)
-	// Add more providers:
-	// case "twilio":
-	//     return NewTwilioSMS(cfg.TwilioSID, cfg.TwilioToken, cfg.TwilioFrom)
-	default:
-		return NewSparrowSMS(cfg.SMSAPIKey, cfg.SMSSenderID)
+	cfg := config.AppConfig
+	if cfg == nil || strings.ToLower(cfg.SMSProvider) == "disabled" {
+		return DisabledSMS{}
 	}
+	if strings.ToLower(cfg.SMSProvider) == "sparrow" {
+		return &SparrowSMS{APIKey: cfg.SMSAPIKey, SenderID: cfg.SMSSenderID}
+	}
+	return DisabledSMS{}
 }

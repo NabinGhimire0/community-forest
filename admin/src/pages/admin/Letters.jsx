@@ -37,7 +37,7 @@ import {
 } from "../../components/ui/Table";
 import LoadingSpinner from "../../components/common/LoadingSpinner";
 import { useToast } from "../../components/common/Toast";
-import { formatDate } from "../../utils/helpers";
+import { formatDate, getImageUrl } from "../../utils/helpers";
 
 const emptyLetter = {
   type: "incoming",
@@ -82,7 +82,7 @@ export default function Letters() {
     try {
       const res = await api.getLetters({
         page,
-        limit: 10,
+        per_page: 10,
         search: search || undefined,
         type: typeFilter || undefined,
       });
@@ -90,7 +90,7 @@ export default function Letters() {
         setLetters(res.data || []);
         setTotalPages(res.meta?.total_pages || 1);
       }
-    } catch (err) {
+    } catch (_err) {
       addToast("Failed to load letters", "error");
     } finally {
       setIsLoading(false);
@@ -354,7 +354,7 @@ export default function Letters() {
                       <TableCell>
                         {letter.document_file ? (
                           <a
-                            href={letter.document_file}
+                            href={getImageUrl(letter.document_file)}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="inline-flex items-center gap-1 text-emerald-600 hover:text-emerald-700"
@@ -378,24 +378,24 @@ export default function Letters() {
                             <Eye size={15} />
                           </Button>
                           {canEdit && (
-                            <>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => openEdit(letter)}
-                                title="Edit"
-                              >
-                                <Edit2 size={15} />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => setDeleteTarget(letter.id)}
-                                title="Delete"
-                              >
-                                <Trash2 size={15} className="text-red-500" />
-                              </Button>
-                            </>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => openEdit(letter)}
+                              title="Edit"
+                            >
+                              <Edit2 size={15} />
+                            </Button>
+                          )}
+                          {isAdmin && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => setDeleteTarget(letter.id)}
+                              title="Delete"
+                            >
+                              <Trash2 size={15} className="text-red-500" />
+                            </Button>
                           )}
                         </div>
                       </TableCell>
@@ -714,7 +714,7 @@ export default function Letters() {
                     </span>
                   </div>
                   <a
-                    href={viewingLetter.document_file}
+                    href={getImageUrl(viewingLetter.document_file)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-emerald-600 hover:text-emerald-700 text-sm flex items-center gap-1"

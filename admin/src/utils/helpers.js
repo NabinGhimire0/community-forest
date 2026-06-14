@@ -78,3 +78,33 @@ export function getStatusClasses(status) {
     "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400"
   );
 }
+
+// Add this function to get image URL consistently
+export function getImageUrl(path) {
+  if (!path) return null;
+  if (path.startsWith("http")) return path;
+  if (path.startsWith("/uploads")) {
+    const uploadsBase = import.meta.env.VITE_UPLOADS_URL || "/uploads";
+    return uploadsBase + path.replace("/uploads", "");
+  }
+  return path;
+}
+
+export function getOrganizationLocation(settings = {}) {
+  const local = [
+    settings.address,
+    settings.ward_no ? `Ward ${settings.ward_no}` : null,
+    settings.municipality,
+  ].filter(Boolean);
+  const regional = [settings.district, settings.province].filter(Boolean);
+  return [...local, ...regional].join(", ");
+}
+
+export function getRoleLabel(role) {
+  const labels = {
+    admin: "Administrator",
+    staff: "Staff",
+    member: "Member",
+  };
+  return labels[role] || "User";
+}

@@ -1,81 +1,37 @@
+import { ArrowLeft, Home, TriangleAlert } from "lucide-react";
 import { Link } from "react-router-dom";
-import { motion } from "framer-motion";
-import { AlertTriangle, Home, ArrowLeft } from "lucide-react";
 
-import Button from "../components/ui/Button";
-
-// ---------------------------------------------------------------------------
-// Animation variants
-// ---------------------------------------------------------------------------
-const containerVariants = {
-  hidden: { opacity: 0 },
-  visible: {
-    opacity: 1,
-    transition: { staggerChildren: 0.1 },
-  },
-};
-const itemVariants = {
-  hidden: { opacity: 0, y: 20 },
-  visible: { opacity: 1, y: 0, transition: { duration: 0.5, ease: "easeOut" } },
-};
-
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
 export default function NotFound() {
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-50 px-4">
-      <motion.div
-        className="text-center max-w-md mx-auto"
-        variants={containerVariants}
-        initial="hidden"
-        animate="visible"
-      >
-        {/* Icon */}
-        <motion.div variants={itemVariants} className="flex justify-center mb-6">
-          <div className="p-4 rounded-2xl bg-amber-50">
-            <AlertTriangle className="h-12 w-12 text-amber-500" />
-          </div>
-        </motion.div>
-
-        {/* 404 Number */}
-        <motion.div variants={itemVariants}>
-          <h1 className="text-8xl font-extrabold text-slate-900 tracking-tight">
-            404
-          </h1>
-        </motion.div>
-
-        {/* Title */}
-        <motion.div variants={itemVariants} className="mt-4">
-          <h2 className="text-2xl font-bold text-slate-800">
-            Page not found
-          </h2>
-        </motion.div>
-
-        {/* Description */}
-        <motion.div variants={itemVariants} className="mt-3">
-          <p className="text-sm text-slate-500 leading-relaxed">
-            The page you are looking for doesn't exist or has been moved.
-            Please check the URL or navigate back to the homepage.
-          </p>
-        </motion.div>
-
-        {/* Action Buttons */}
-        <motion.div variants={itemVariants} className="mt-8 flex items-center justify-center gap-3">
-          <Link to="/">
-            <Button variant="outline">
-              <Home className="h-4 w-4 mr-2" />
-              Go Home
-            </Button>
+    <div className="flex min-h-screen items-center justify-center bg-slate-50 px-5 text-center dark:bg-slate-950">
+      <div className="max-w-md">
+        <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+          <TriangleAlert size={30} />
+        </div>
+        <p className="mt-6 text-7xl font-black tracking-tight text-slate-950 dark:text-white">
+          404
+        </p>
+        <h1 className="mt-3 text-2xl font-extrabold text-slate-900 dark:text-white">
+          Page not found
+        </h1>
+        <p className="mt-3 text-sm leading-6 text-slate-500 dark:text-slate-400">
+          The page does not exist or your account does not have access to it.
+        </p>
+        <div className="mt-7 flex flex-wrap justify-center gap-3">
+          <Link
+            to="/"
+            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-100 dark:border-white/10 dark:bg-slate-900 dark:text-slate-200"
+          >
+            <Home size={17} /> Public page
           </Link>
-          <Link to="/admin/dashboard">
-            <Button variant="primary">
-              <ArrowLeft className="h-4 w-4 mr-2" />
-              Dashboard
-            </Button>
+          <Link
+            to="/dashboard"
+            className="inline-flex items-center gap-2 rounded-xl bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-800"
+          >
+            <ArrowLeft size={17} /> Dashboard
           </Link>
-        </motion.div>
-      </motion.div>
+        </div>
+      </div>
     </div>
   );
 }

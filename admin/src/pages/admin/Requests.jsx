@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useSelector } from "react-redux";
 import {
   Plus,
@@ -13,6 +13,7 @@ import {
   Calendar,
   User,
   DollarSign,
+  Wallet,
 } from "lucide-react";
 import { api } from "../../services/api";
 import { Card, CardContent } from "../../components/ui/Card";
@@ -33,6 +34,11 @@ import {
 import LoadingSpinner from "../../components/common/LoadingSpinner";
 import { useToast } from "../../components/common/Toast";
 import { formatCurrency, formatDate } from "../../utils/helpers";
+import {
+  buildFiscalYearOptions,
+  getActiveFiscalYear,
+  getActiveFiscalYearId,
+} from "../../utils/fiscalYears";
 
 const emptyRequest = {
   member_id: "",
@@ -54,7 +60,7 @@ export default function Requests() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [fiscalYearFilter, setFiscalYearFilter] = useState("");
-  const [activeTab, setActiveTab] = useState("all");
+  const [activeTab, setActiveTab] = useState(isMember ? "my" : "all");
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [refreshing, setRefreshing] = useState(false);
@@ -70,11 +76,32 @@ export default function Requests() {
   const [remark, setRemark] = useState("");
   const [approveQuantity, setApproveQuantity] = useState("");
   const [saving, setSaving] = useState(false);
+  const [payingRequestId, setPayingRequestId] = useState(null);
 
   // Form state
   const [form, setForm] = useState(emptyRequest);
   const [resourceItems, setResourceItems] = useState([]);
   const [fiscalYears, setFiscalYears] = useState([]);
+
+  const activeFiscalYear = useMemo(
+    () => getActiveFiscalYear(fiscalYears),
+    [fiscalYears],
+  );
+  const activeFiscalYearId = activeFiscalYear
+    ? String(activeFiscalYear.id)
+    : "";
+
+  const resetRequestForm = useCallback(() => {
+    setForm({
+      ...emptyRequest,
+      fiscal_year_id: activeFiscalYearId,
+    });
+  }, [activeFiscalYearId]);
+
+  const openCreateRequestModal = useCallback(() => {
+    resetRequestForm();
+    setShowCreateModal(true);
+  }, [resetRequestForm]);
 
   const fetchMasterData = useCallback(async () => {
     try {
@@ -83,15 +110,26 @@ export default function Requests() {
         api.getFiscalYears(),
       ]);
       if (itemsRes.success) setResourceItems(itemsRes.data || []);
-      if (fiscalYearsRes.success) setFiscalYears(fiscalYearsRes.data || []);
+      if (fiscalYearsRes.success) {
+        const years = fiscalYearsRes.data || [];
+        const activeId = getActiveFiscalYearId(years);
+        setFiscalYears(years);
+        setForm((current) => ({
+          ...current,
+          fiscal_year_id: current.fiscal_year_id || activeId,
+        }));
+        if (canApprove) {
+          setFiscalYearFilter((current) => current || activeId);
+        }
+      }
     } catch (err) {
       console.error("Failed to fetch master data:", err);
     }
-  }, []);
+  }, [canApprove]);
 
   const fetchMembers = useCallback(async () => {
     try {
-      const res = await api.getMembers({ limit: 100 });
+      const res = await api.getMembers({ per_page: 100 });
       if (res.success) setMembers(res.data || []);
     } catch (err) {
       console.error("Failed to fetch members:", err);
@@ -101,13 +139,12 @@ export default function Requests() {
   const fetchRequests = useCallback(async () => {
     setIsLoading(true);
     try {
-      const fetchFn =
-        activeTab === "my" && isMember
-          ? api.getMyRequests.bind(api)
-          : api.getRequests.bind(api);
+      const fetchFn = isMember
+        ? api.getMyRequests.bind(api)
+        : api.getRequests.bind(api);
       const res = await fetchFn({
         page,
-        limit: 10,
+        per_page: isMember ? 100 : 10,
         search: search || undefined,
         status: statusFilter || undefined,
         fiscal_year_id: fiscalYearFilter || undefined,
@@ -116,7 +153,7 @@ export default function Requests() {
         setRequests(res.data || []);
         setTotalPages(res.meta?.total_pages || 1);
       }
-    } catch (err) {
+    } catch (_err) {
       addToast("Failed to load requests", "error");
     } finally {
       setIsLoading(false);
@@ -127,7 +164,6 @@ export default function Requests() {
     search,
     statusFilter,
     fiscalYearFilter,
-    activeTab,
     isMember,
     addToast,
   ]);
@@ -159,6 +195,18 @@ export default function Requests() {
   const handleCreate = async () => {
     setSaving(true);
     try {
+      if (!form.fiscal_year_id) {
+        throw new Error("No active fiscal year is available");
+      }
+      if (
+        isMember &&
+        (!activeFiscalYearId || form.fiscal_year_id !== activeFiscalYearId)
+      ) {
+        throw new Error(
+          "Members can submit resource requests only for the active fiscal year",
+        );
+      }
+
       const payload = {
         member_id:
           !isMember && canApprove && form.member_id
@@ -174,7 +222,7 @@ export default function Requests() {
       if (res.success) {
         addToast("Request submitted successfully", "success");
         setShowCreateModal(false);
-        setForm(emptyRequest);
+        resetRequestForm();
         fetchRequests();
         fetchStats();
       } else {
@@ -239,6 +287,35 @@ export default function Requests() {
     }
   };
 
+  const getPaidAmount = (request) =>
+    (request?.payments || [])
+      .filter((payment) => payment.status === "paid")
+      .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+
+  const getOutstandingAmount = (request) =>
+    Math.max(0, Number(request?.total_amount || 0) - getPaidAmount(request));
+
+  const hasPendingEsewa = (request) =>
+    (request?.payments || []).some(
+      (payment) =>
+        payment.payment_method === "esewa" && payment.status === "pending",
+    );
+
+  const handleEsewaPayment = async (request) => {
+    if (!request?.id) return;
+    setPayingRequestId(request.id);
+    try {
+      const result = await api.initiateEsewaPayment(request.id);
+      if (!result.success || !result.data?.action_url) {
+        throw new Error(result.message || "Unable to initialize eSewa payment");
+      }
+      api.submitEsewaForm(result.data.action_url, result.data.fields);
+    } catch (err) {
+      addToast(err.message || "Unable to initialize eSewa payment", "error");
+      setPayingRequestId(null);
+    }
+  };
+
   const openView = async (request) => {
     setViewingRequest(request);
     setShowViewModal(true);
@@ -254,10 +331,9 @@ export default function Requests() {
     setShowActionModal(true);
   };
 
-  const tabs = [
-    { id: "all", label: "All Requests" },
-    ...(isMember ? [{ id: "my", label: "My Requests" }] : []),
-  ];
+  const tabs = isMember
+    ? [{ id: "my", label: "My Requests" }]
+    : [{ id: "all", label: "All Requests" }];
 
   const getSelectedItemDetails = () => {
     const item = resourceItems.find(
@@ -266,16 +342,31 @@ export default function Requests() {
     return item;
   };
 
+  const visibleRequests = useMemo(() => {
+    if (!isMember) return requests;
+    const term = search.trim().toLowerCase();
+    return requests.filter((request) => {
+      const resourceName =
+        request.resource_item?.name || request.resource_name || "";
+      const matchesSearch =
+        !term ||
+        String(request.id).includes(term) ||
+        resourceName.toLowerCase().includes(term);
+      const matchesStatus = !statusFilter || request.status === statusFilter;
+      return matchesSearch && matchesStatus;
+    });
+  }, [isMember, requests, search, statusFilter]);
+
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-            Resource Requests
+            {isMember ? "My Resource Requests" : "Resource Requests"}
           </h1>
           <p className="text-sm text-gray-500 dark:text-gray-400">
-            Submit and manage forest resource requests
+            {isMember ? "Submit and track your forest resource requests" : "Submit and manage forest resource requests"}
           </p>
         </div>
         <div className="flex gap-2">
@@ -292,9 +383,14 @@ export default function Requests() {
           </Button>
           <Button
             onClick={() => {
-              setForm(emptyRequest);
-              setShowCreateModal(true);
+              openCreateRequestModal();
             }}
+            disabled={isMember && !activeFiscalYear}
+            title={
+              isMember && !activeFiscalYear
+                ? "An administrator must activate a fiscal year first"
+                : undefined
+            }
           >
             <Plus size={16} /> New Request
           </Button>
@@ -351,7 +447,8 @@ export default function Requests() {
       <Card>
         <CardContent className="p-4">
           <div className="flex flex-col sm:flex-row gap-3">
-            <div className="flex gap-1 bg-gray-100 dark:bg-gray-800/50 rounded-lg p-1">
+            {tabs.length > 1 && (
+              <div className="flex gap-1 bg-gray-100 dark:bg-gray-800/50 rounded-lg p-1">
               {tabs.map((tab) => (
                 <button
                   key={tab.id}
@@ -368,7 +465,8 @@ export default function Requests() {
                   {tab.label}
                 </button>
               ))}
-            </div>
+              </div>
+            )}
             <div className="flex-1 relative">
               <Search
                 size={16}
@@ -407,13 +505,9 @@ export default function Requests() {
                   setFiscalYearFilter(e.target.value);
                   setPage(1);
                 }}
-                options={[
-                  { value: "", label: "All Fiscal Years" },
-                  ...fiscalYears.map((fy) => ({
-                    value: String(fy.id),
-                    label: fy.name,
-                  })),
-                ]}
+                options={buildFiscalYearOptions(fiscalYears, {
+                  includeAll: true,
+                })}
                 className="w-40"
               />
             )}
@@ -426,14 +520,15 @@ export default function Requests() {
         <CardContent className="p-0">
           {isLoading ? (
             <LoadingSpinner text="Loading requests..." />
-          ) : requests.length === 0 ? (
+          ) : visibleRequests.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-gray-400">
               <FileText size={48} className="mb-3 opacity-30" />
               <p className="text-lg font-medium">No requests found</p>
               <Button
                 variant="outline"
                 className="mt-4"
-                onClick={() => setShowCreateModal(true)}
+                onClick={openCreateRequestModal}
+                disabled={isMember && !activeFiscalYear}
               >
                 <Plus size={14} /> Create your first request
               </Button>
@@ -455,7 +550,7 @@ export default function Requests() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {requests.map((req) => (
+                  {visibleRequests.map((req) => (
                     <TableRow key={req.id}>
                       <TableCell className="font-mono text-xs">
                         #{req.id}
@@ -497,6 +592,27 @@ export default function Requests() {
                           >
                             <Eye size={15} />
                           </Button>
+                          {isMember &&
+                            req.status === "approved" &&
+                            getOutstandingAmount(req) > 0 && (
+                              <Button
+                                variant="success"
+                                size="sm"
+                                onClick={() => handleEsewaPayment(req)}
+                                disabled={
+                                  payingRequestId === req.id ||
+                                  hasPendingEsewa(req)
+                                }
+                                title="Pay approved request with eSewa"
+                              >
+                                <Wallet size={14} />
+                                {hasPendingEsewa(req)
+                                  ? "Pending"
+                                  : payingRequestId === req.id
+                                    ? "Opening..."
+                                    : "Pay eSewa"}
+                              </Button>
+                            )}
                           {canApprove && req.status === "pending" && (
                             <>
                               <Button
@@ -560,7 +676,7 @@ export default function Requests() {
         isOpen={showCreateModal}
         onClose={() => {
           setShowCreateModal(false);
-          setForm(emptyRequest);
+          resetRequestForm();
         }}
         title="New Resource Request"
         size="lg"
@@ -600,13 +716,28 @@ export default function Requests() {
             onChange={(e) =>
               setForm({ ...form, fiscal_year_id: e.target.value })
             }
-            options={fiscalYears.map((fy) => ({
-              value: String(fy.id),
-              label: fy.name,
-            }))}
-            placeholder="Select fiscal year"
+            options={
+              isMember
+                ? buildFiscalYearOptions(
+                    activeFiscalYear ? [activeFiscalYear] : [],
+                  )
+                : buildFiscalYearOptions(fiscalYears)
+            }
+            placeholder={
+              isMember && !activeFiscalYear
+                ? "No active fiscal year"
+                : "Select fiscal year"
+            }
+            disabled={isMember}
             required
           />
+
+          {isMember && activeFiscalYear && (
+            <div className="-mt-2 rounded-lg bg-emerald-50 p-3 text-xs font-medium text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300">
+              Resource requests are accepted only for the active fiscal year: {" "}
+              <strong>{activeFiscalYear.name}</strong>.
+            </div>
+          )}
 
           <Select
             label="Resource Item"
@@ -814,6 +945,42 @@ export default function Requests() {
                       {formatCurrency(viewingRequest.total_amount)}
                     </p>
                   </div>
+                </div>
+              </div>
+            )}
+
+            {isMember && viewingRequest.status === "approved" && (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-900/50 dark:bg-emerald-900/10">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="text-xs text-emerald-700 dark:text-emerald-300">
+                      Outstanding Amount
+                    </p>
+                    <p className="text-xl font-bold text-emerald-700 dark:text-emerald-300">
+                      {formatCurrency(getOutstandingAmount(viewingRequest))}
+                    </p>
+                    <p className="mt-1 text-xs text-gray-500">
+                      Online payment is available only through eSewa. Cash is
+                      recorded by an administrator.
+                    </p>
+                  </div>
+                  {getOutstandingAmount(viewingRequest) > 0 && (
+                    <Button
+                      variant="success"
+                      onClick={() => handleEsewaPayment(viewingRequest)}
+                      disabled={
+                        payingRequestId === viewingRequest.id ||
+                        hasPendingEsewa(viewingRequest)
+                      }
+                    >
+                      <Wallet size={16} />
+                      {hasPendingEsewa(viewingRequest)
+                        ? "eSewa Payment Pending"
+                        : payingRequestId === viewingRequest.id
+                          ? "Opening eSewa..."
+                          : "Pay with eSewa"}
+                    </Button>
+                  )}
                 </div>
               </div>
             )}

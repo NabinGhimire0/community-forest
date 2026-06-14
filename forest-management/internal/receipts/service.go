@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"forest-management/config"
 	"forest-management/internal/models"
 
 	"github.com/jung-kurt/gofpdf"
@@ -18,8 +19,8 @@ type ReceiptService struct {
 }
 
 func NewReceiptService(db *gorm.DB) *ReceiptService {
-	uploadDir := "./uploads/receipts"
-	os.MkdirAll(uploadDir, os.ModePerm)
+	uploadDir := filepath.Join(config.AppConfig.UploadDir, "receipts")
+	_ = os.MkdirAll(uploadDir, 0o750)
 	return &ReceiptService{db: db, uploadDir: uploadDir}
 }
 
@@ -279,4 +280,97 @@ func (s *ReceiptService) GenerateExpenseReceipt(expenseID uint) (string, error) 
 	}
 
 	return filePath, nil
+}
+
+// GeneratePaymentReceipt creates an immutable receipt for one payment event.
+// This is important for partial payments because a ledger transaction may have
+// several separate receipts.
+func (s *ReceiptService) GeneratePaymentReceipt(paymentID, userID uint, role string) (string, error) {
+	var payment models.Payment
+	query := s.db.Model(&models.Payment{})
+	if role == "member" {
+		query = query.Joins("JOIN members ON members.id = payments.member_id").Where("members.user_id = ?", userID)
+	}
+	if err := query.Preload("Member").Preload("Request.ResourceItem.Type").Preload("Request.FiscalYear").Preload("LedgerTransaction.FiscalYear").First(&payment, paymentID).Error; err != nil {
+		return "", fmt.Errorf("payment not found")
+	}
+	if payment.Status != "paid" {
+		return "", fmt.Errorf("receipt is available only for paid payments")
+	}
+
+	var settings models.SamitiSetting
+	_ = s.db.First(&settings).Error
+	pdf := gofpdf.New("P", "mm", "A4", "")
+	pdf.AddPage()
+	pdf.SetFont("Helvetica", "B", 16)
+	pdf.CellFormat(190, 10, settings.Name, "", 1, "C", false, 0, "")
+	pdf.SetFont("Helvetica", "", 9)
+	pdf.CellFormat(190, 6, fmt.Sprintf("%s, Ward-%d, %s, %s", settings.Address, settings.WardNo, settings.Municipality, settings.District), "", 1, "C", false, 0, "")
+	pdf.Ln(2)
+	pdf.Line(10, pdf.GetY(), 200, pdf.GetY())
+	pdf.Ln(5)
+	pdf.SetFont("Helvetica", "B", 14)
+	pdf.CellFormat(190, 10, "PAYMENT RECEIPT", "", 1, "C", false, 0, "")
+
+	receiptNo := fmt.Sprintf("PAY-%d", payment.ID)
+	if payment.ReceiptNo != nil {
+		receiptNo = *payment.ReceiptNo
+	}
+	paidDate := payment.CreatedAt
+	if payment.PaidAt != nil {
+		paidDate = *payment.PaidAt
+	}
+	rows := [][]string{
+		{"Receipt No:", receiptNo}, {"Date:", paidDate.Format("2006-01-02 15:04")},
+		{"Member:", payment.Member.Name}, {"Membership No:", payment.Member.MembershipNo},
+		{"Payment Method:", payment.PaymentMethod}, {"Amount Paid:", fmt.Sprintf("Rs. %.2f", payment.Amount)},
+	}
+	if payment.GatewayReferenceID != nil {
+		rows = append(rows, []string{"Gateway Ref:", *payment.GatewayReferenceID})
+	}
+	if payment.TransactionID != nil {
+		rows = append(rows, []string{"Transaction Code:", *payment.TransactionID})
+	}
+	if payment.Request != nil {
+		description := "Approved resource request"
+		if payment.Request.ResourceItem != nil {
+			description = payment.Request.ResourceItem.Name
+		}
+		rows = append(rows, []string{"For:", description})
+		if payment.Request.FiscalYear != nil {
+			rows = append(rows, []string{"Fiscal Year:", payment.Request.FiscalYear.Name})
+		}
+	} else if payment.LedgerTransaction != nil {
+		rows = append(rows, []string{"For:", "Historical balance settlement"})
+		if payment.LedgerTransaction.FiscalYear != nil {
+			rows = append(rows, []string{"Fiscal Year:", payment.LedgerTransaction.FiscalYear.Name})
+		}
+	}
+	if payment.Remarks != nil {
+		rows = append(rows, []string{"Remarks:", *payment.Remarks})
+	}
+
+	pdf.Ln(3)
+	for _, row := range rows {
+		pdf.SetFont("Helvetica", "B", 10)
+		pdf.CellFormat(45, 8, row[0], "1", 0, "L", false, 0, "")
+		pdf.SetFont("Helvetica", "", 10)
+		pdf.CellFormat(145, 8, row[1], "1", 1, "L", false, 0, "")
+	}
+	pdf.Ln(14)
+	pdf.CellFormat(65, 7, "_____________________", "", 0, "C", false, 0, "")
+	pdf.CellFormat(60, 7, "", "", 0, "C", false, 0, "")
+	pdf.CellFormat(65, 7, "_____________________", "", 1, "C", false, 0, "")
+	pdf.SetFont("Helvetica", "", 9)
+	pdf.CellFormat(65, 5, "Member Signature", "", 0, "C", false, 0, "")
+	pdf.CellFormat(60, 5, "", "", 0, "C", false, 0, "")
+	pdf.CellFormat(65, 5, "Authorized Signature", "", 1, "C", false, 0, "")
+
+	filename := fmt.Sprintf("payment_%d_%d.pdf", payment.ID, time.Now().UnixNano())
+	path := filepath.Join(s.uploadDir, filename)
+	if err := pdf.OutputFileAndClose(path); err != nil {
+		return "", fmt.Errorf("failed to generate payment receipt: %w", err)
+	}
+	_ = os.Chmod(path, 0o600)
+	return path, nil
 }

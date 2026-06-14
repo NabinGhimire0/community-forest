@@ -3,7 +3,9 @@ package notifications
 import (
 	"strconv"
 
+	"forest-management/internal/audit"
 	"forest-management/pkg/middleware"
+	"forest-management/pkg/requestutil"
 	"forest-management/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -21,8 +23,7 @@ func NewNotificationHandler(service *NotificationService) *NotificationHandler {
 func (h *NotificationHandler) List(c *gin.Context) {
 	userID := middleware.GetUserID(c)
 	role := middleware.GetUserRole(c)
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
+	page, perPage := requestutil.Pagination(c)
 
 	notifications, meta, err := h.service.GetUserNotifications(userID, role, page, perPage)
 	if err != nil {
@@ -52,7 +53,9 @@ func (h *NotificationHandler) MarkRead(c *gin.Context) {
 	userID := middleware.GetUserID(c)
 	id, _ := strconv.Atoi(c.Param("id"))
 
-	if err := h.service.MarkAsRead(uint(id), userID); err != nil {
+	role := middleware.GetUserRole(c)
+
+	if err := h.service.MarkAsRead(uint(id), userID, role); err != nil {
 		response.Error(c, 500, "Failed to mark as read")
 		return
 	}
@@ -89,9 +92,28 @@ func (h *NotificationHandler) AdminCreate(c *gin.Context) {
 
 	notif, err := h.service.CreateNotification(input.UserID, input.TargetRole, input.Title, input.Message, input.Type, nil, nil)
 	if err != nil {
-		response.Error(c, 500, err.Error())
+		response.Error(c, 500, "Failed to create notification")
 		return
 	}
+
+	actorID := middleware.GetUserID(c)
+	audit.CreateAuditEntry(
+		h.service.db,
+		&actorID,
+		"create",
+		"notification",
+		&notif.ID,
+		nil,
+		gin.H{
+			"user_id":     input.UserID,
+			"target_role": input.TargetRole,
+			"title":       input.Title,
+			"type":        input.Type,
+		},
+		c.ClientIP(),
+		c.Request.UserAgent(),
+		"Administrator created a notification",
+	)
 
 	response.Created(c, "Notification created", notif)
 }

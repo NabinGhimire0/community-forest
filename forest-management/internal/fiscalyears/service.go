@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"time"
 
+	"forest-management/internal/membershipfees"
 	"forest-management/internal/models"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type FiscalYearService struct {
@@ -66,131 +68,281 @@ func (s *FiscalYearService) GetByID(id uint) (*models.FiscalYear, error) {
 	return &fy, err
 }
 
-// Update updates a fiscal year
+// Update updates a fiscal year. Activation must use SetActive so stock carry-forward cannot be bypassed.
 func (s *FiscalYearService) Update(id uint, input UpdateFiscalYearInput) (*models.FiscalYear, error) {
 	var fy models.FiscalYear
 	if err := s.db.First(&fy, id).Error; err != nil {
 		return nil, errors.New("fiscal year not found")
 	}
 
-	updates := make(map[string]interface{})
-
+	name := fy.Name
+	startDate := fy.StartDate
+	endDate := fy.EndDate
 	if input.Name != "" {
-		var existing models.FiscalYear
-		if s.db.Where("name = ? AND id != ?", input.Name, id).First(&existing).Error == nil {
+		var count int64
+		s.db.Model(&models.FiscalYear{}).Where("name = ? AND id != ?", input.Name, id).Count(&count)
+		if count > 0 {
 			return nil, errors.New("fiscal year with this name already exists")
 		}
-		updates["name"] = input.Name
+		name = input.Name
 	}
 	if input.StartDate != "" {
-		startDate, err := time.Parse("2006-01-02", input.StartDate)
+		parsed, err := time.Parse("2006-01-02", input.StartDate)
 		if err != nil {
 			return nil, errors.New("invalid start date format")
 		}
-		updates["start_date"] = startDate
+		startDate = parsed
 	}
 	if input.EndDate != "" {
-		endDate, err := time.Parse("2006-01-02", input.EndDate)
+		parsed, err := time.Parse("2006-01-02", input.EndDate)
 		if err != nil {
 			return nil, errors.New("invalid end date format")
 		}
-		updates["end_date"] = endDate
+		endDate = parsed
 	}
-	if input.IsActive != nil {
-		updates["is_active"] = *input.IsActive
+	if endDate.Before(startDate) {
+		return nil, errors.New("end date must be after start date")
 	}
-
-	if len(updates) > 0 {
-		if err := s.db.Model(&fy).Updates(updates).Error; err != nil {
-			return nil, fmt.Errorf("failed to update: %w", err)
-		}
+	if input.IsActive != nil && *input.IsActive != fy.IsActive {
+		return nil, errors.New("use the Set Active action to change the active fiscal year")
 	}
 
+	if err := s.db.Model(&fy).Updates(map[string]interface{}{
+		"name": name, "start_date": startDate, "end_date": endDate,
+	}).Error; err != nil {
+		return nil, fmt.Errorf("failed to update: %w", err)
+	}
 	s.db.First(&fy, id)
 	return &fy, nil
 }
 
-// Delete deletes a fiscal year
+// Delete removes only a completely unused, inactive fiscal year. Official
+// financial and stock history is never cascaded or silently destroyed.
 func (s *FiscalYearService) Delete(id uint) error {
-	// Check if has any associated data
-	var feeCount int64
-	s.db.Model(&models.FeeSetting{}).Where("fiscal_year_id = ?", id).Count(&feeCount)
-	if feeCount > 0 {
-		return errors.New("cannot delete: fiscal year has fee settings")
+	var fiscalYear models.FiscalYear
+	if err := s.db.First(&fiscalYear, id).Error; err != nil {
+		return errors.New("fiscal year not found")
+	}
+	if fiscalYear.IsActive {
+		return errors.New("the active fiscal year cannot be deleted")
 	}
 
-	var stockCount int64
-	s.db.Model(&models.Stock{}).Where("fiscal_year_id = ?", id).Count(&stockCount)
-	if stockCount > 0 {
-		return errors.New("cannot delete: fiscal year has stock entries")
+	checks := []struct {
+		model   interface{}
+		message string
+	}{
+		{&models.FeeSetting{}, "cannot delete: fiscal year has fee settings"},
+		{&models.Stock{}, "cannot delete: fiscal year has stock entries"},
+		{&models.ResourceRate{}, "cannot delete: fiscal year has resource rates"},
+		{&models.Transaction{}, "cannot delete: fiscal year has ledger transactions"},
+		{&models.Request{}, "cannot delete: fiscal year has resource requests"},
+		{&models.Expense{}, "cannot delete: fiscal year has expenses"},
+		{&models.Fine{}, "cannot delete: fiscal year has fines"},
 	}
-
-	var rateCount int64
-	s.db.Model(&models.ResourceRate{}).Where("fiscal_year_id = ?", id).Count(&rateCount)
-	if rateCount > 0 {
-		return errors.New("cannot delete: fiscal year has resource rates")
+	for _, check := range checks {
+		var count int64
+		if err := s.db.Unscoped().Model(check.model).Where("fiscal_year_id = ?", id).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			return errors.New(check.message)
+		}
 	}
-
-	return s.db.Delete(&models.FiscalYear{}, id).Error
+	return s.db.Delete(&fiscalYear).Error
 }
 
-// SetActive deactivates all fiscal years and activates the specified one
+// SetActive activates a fiscal year and carries the previous year's remaining stock,
+// resource rates and membership fee into missing rows in the target year. Existing
+// target-year rows are never overwritten, so the operation is safe to retry.
 func (s *FiscalYearService) SetActive(id uint) (*models.FiscalYear, error) {
-	var fy models.FiscalYear
-	if err := s.db.First(&fy, id).Error; err != nil {
+	var target models.FiscalYear
+	if err := s.db.First(&target, id).Error; err != nil {
 		return nil, errors.New("fiscal year not found")
 	}
 
 	tx := s.db.Begin()
-
-	// Deactivate ALL fiscal years
-	if err := tx.Model(&models.FiscalYear{}).Where("is_active = ?", true).
-		Update("is_active", false).Error; err != nil {
+	if tx.Error != nil {
+		return nil, tx.Error
+	}
+	// Serialize fiscal-year activation so concurrent administrators cannot race
+	// stock rollover or leave more than one active year.
+	if err := tx.Exec("LOCK TABLE fiscal_years IN SHARE ROW EXCLUSIVE MODE").Error; err != nil {
 		tx.Rollback()
 		return nil, err
 	}
+	defer func() {
+		if recoverValue := recover(); recoverValue != nil {
+			tx.Rollback()
+			panic(recoverValue)
+		}
+	}()
 
-	// Activate the selected one
-	if err := tx.Model(&fy).Update("is_active", true).Error; err != nil {
+	var source models.FiscalYear
+	hasSource := false
+	if err := tx.Where("is_active = ? AND id != ?", true, id).First(&source).Error; err == nil {
+		hasSource = true
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		tx.Rollback()
 		return nil, err
 	}
+	if !hasSource {
+		if err := tx.Where("start_date < ? AND id != ?", target.StartDate, id).
+			Order("start_date DESC").First(&source).Error; err == nil {
+			hasSource = true
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			tx.Rollback()
+			return nil, err
+		}
+	}
 
-	tx.Commit()
+	carriedStock, carriedRates, carriedFees := 0, 0, 0
+	if hasSource {
+		var stocks []models.Stock
+		if err := tx.Where("fiscal_year_id = ?", source.ID).Find(&stocks).Error; err != nil {
+			tx.Rollback()
+			return nil, err
+		}
+		for _, old := range stocks {
+			available := old.RemainingQuantity - old.ReservedQuantity
+			if available < 0 {
+				available = 0
+			}
+			row := models.Stock{ResourceItemID: old.ResourceItemID, FiscalYearID: target.ID, TotalQuantity: available, RemainingQuantity: available, ReservedQuantity: 0}
+			result := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "resource_item_id"}, {Name: "fiscal_year_id"}}, DoNothing: true}).Create(&row)
+			if result.Error != nil {
+				tx.Rollback()
+				return nil, result.Error
+			}
+			if result.RowsAffected > 0 {
+				carriedStock++
+			}
+		}
 
-	s.db.First(&fy, id)
-	return &fy, nil
+		var rates []models.ResourceRate
+		if err := tx.Where("fiscal_year_id = ?", source.ID).Find(&rates).Error; err != nil {
+			tx.Rollback()
+			return nil, err
+		}
+		for _, old := range rates {
+			row := models.ResourceRate{ResourceItemID: old.ResourceItemID, FiscalYearID: target.ID, RatePerUnit: old.RatePerUnit}
+			result := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "resource_item_id"}, {Name: "fiscal_year_id"}}, DoNothing: true}).Create(&row)
+			if result.Error != nil {
+				tx.Rollback()
+				return nil, result.Error
+			}
+			if result.RowsAffected > 0 {
+				carriedRates++
+			}
+		}
+
+		var fee models.FeeSetting
+		if err := tx.Where("fiscal_year_id = ?", source.ID).First(&fee).Error; err == nil {
+			row := models.FeeSetting{FiscalYearID: target.ID, MembershipFee: fee.MembershipFee}
+			result := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "fiscal_year_id"}}, DoNothing: true}).Create(&row)
+			if result.Error != nil {
+				tx.Rollback()
+				return nil, result.Error
+			}
+			if result.RowsAffected > 0 {
+				carriedFees++
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			tx.Rollback()
+			return nil, err
+		}
+	}
+
+	// A fiscal year cannot become active without a configured membership fee.
+	// The setting may already exist or may have been carried from the previous year.
+	var targetFee models.FeeSetting
+	if err := tx.Where("fiscal_year_id = ?", target.ID).First(&targetFee).Error; err != nil {
+		tx.Rollback()
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("set the Gasti/Membership fee before activating this fiscal year")
+		}
+		return nil, err
+	}
+
+	assignedMemberFees, err := membershipfees.AssignForFiscalYear(tx, target, targetFee.MembershipFee)
+	if err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("failed to assign annual membership fees: %w", err)
+	}
+
+	if err := tx.Model(&models.FiscalYear{}).Where("is_active = ?", true).Update("is_active", false).Error; err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	if err := tx.Model(&models.FiscalYear{}).Where("id = ?", id).Update("is_active", true).Error; err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	if err := tx.Commit().Error; err != nil {
+		return nil, err
+	}
+
+	if err := s.db.First(&target, id).Error; err != nil {
+		return nil, err
+	}
+	target.CarriedStockItems = carriedStock
+	target.CarriedRateItems = carriedRates
+	target.CarriedFeeItems = carriedFees
+	target.AssignedMemberFees = assignedMemberFees
+	return &target, nil
 }
 
-// SetFee sets (or updates) the membership fee for a fiscal year
+// SetFee sets (or updates) the membership fee for a fiscal year. When the
+// fiscal year is active, missing member charges are created immediately and
+// completely unpaid auto-generated charges are synchronized to the new amount.
 func (s *FiscalYearService) SetFee(input SetFeeInput) (*models.FeeSetting, error) {
-	// Validate fiscal year exists
+	if input.MembershipFee <= 0 {
+		return nil, errors.New("membership fee must be greater than zero")
+	}
+
+	tx := s.db.Begin()
+	if tx.Error != nil {
+		return nil, tx.Error
+	}
+
 	var fiscalYear models.FiscalYear
-	if err := s.db.First(&fiscalYear, input.FiscalYearID).Error; err != nil {
+	if err := tx.First(&fiscalYear, input.FiscalYearID).Error; err != nil {
+		tx.Rollback()
 		return nil, errors.New("fiscal year not found")
 	}
 
-	var existing models.FeeSetting
-	result := s.db.Where("fiscal_year_id = ?", input.FiscalYearID).First(&existing)
-
+	var fee models.FeeSetting
+	result := tx.Where("fiscal_year_id = ?", input.FiscalYearID).First(&fee)
 	if result.Error == nil {
-		// Update existing
-		if err := s.db.Model(&existing).Update("membership_fee", input.MembershipFee).Error; err != nil {
+		if err := tx.Model(&fee).Update("membership_fee", input.MembershipFee).Error; err != nil {
+			tx.Rollback()
 			return nil, err
 		}
-		s.db.Preload("FiscalYear").First(&existing, existing.ID)
-		return &existing, nil
+	} else if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		fee = models.FeeSetting{FiscalYearID: input.FiscalYearID, MembershipFee: input.MembershipFee}
+		if err := tx.Create(&fee).Error; err != nil {
+			tx.Rollback()
+			return nil, err
+		}
+	} else {
+		tx.Rollback()
+		return nil, result.Error
 	}
 
-	// Create new
-	fee := models.FeeSetting{
-		FiscalYearID:  input.FiscalYearID,
-		MembershipFee: input.MembershipFee,
+	if fiscalYear.IsActive {
+		if err := membershipfees.SyncUnpaidAmount(tx, fiscalYear.ID, input.MembershipFee); err != nil {
+			tx.Rollback()
+			return nil, err
+		}
+		if _, err := membershipfees.AssignForFiscalYear(tx, fiscalYear, input.MembershipFee); err != nil {
+			tx.Rollback()
+			return nil, err
+		}
 	}
-	if err := s.db.Create(&fee).Error; err != nil {
+
+	if err := tx.Commit().Error; err != nil {
 		return nil, err
 	}
-	s.db.Preload("FiscalYear").First(&fee, fee.ID)
+	s.db.First(&fee, fee.ID)
 	return &fee, nil
 }
 
@@ -215,16 +367,27 @@ func (s *FiscalYearService) UpdateFee(id uint, input UpdateFeeInput) (*models.Fe
 	if err := s.db.First(&fee, id).Error; err != nil {
 		return nil, errors.New("fee setting not found")
 	}
-
-	if err := s.db.Model(&fee).Update("membership_fee", input.MembershipFee).Error; err != nil {
-		return nil, err
-	}
-
-	s.db.First(&fee, id)
-	return &fee, nil
+	return s.SetFee(SetFeeInput{FiscalYearID: fee.FiscalYearID, MembershipFee: input.MembershipFee})
 }
 
-// DeleteFee deletes a fee setting
+// DeleteFee removes only an unused fee setting. Once annual charges exist,
+// changing the amount must use UpdateFee so paid history remains traceable.
 func (s *FiscalYearService) DeleteFee(id uint) error {
-	return s.db.Delete(&models.FeeSetting{}, id).Error
+	var fee models.FeeSetting
+	if err := s.db.Preload("FiscalYear").First(&fee, id).Error; err != nil {
+		return errors.New("fee setting not found")
+	}
+	if fee.FiscalYear != nil && fee.FiscalYear.IsActive {
+		return errors.New("the active fiscal year's fee cannot be deleted")
+	}
+	var ledgerCount int64
+	if err := s.db.Model(&models.Transaction{}).
+		Where("fiscal_year_id = ? AND type IN ?", fee.FiscalYearID, []string{"membership_fee", "legacy_gasti_fee"}).
+		Count(&ledgerCount).Error; err != nil {
+		return err
+	}
+	if ledgerCount > 0 {
+		return errors.New("cannot delete: membership-fee ledger entries already exist")
+	}
+	return s.db.Delete(&fee).Error
 }

@@ -1,0 +1,32 @@
+# Environment and secrets
+.env
+**/.env
+!**/.env.example
+
+# Frontend
+admin/node_modules/
+admin/dist/
+
+# Backend runtime data
+forest-management/uploads/*
+!forest-management/uploads/.gitkeep
+forest-management/cmd/api/uploads/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build outputs
+*.exe
+*.out
+*.log
+
+# Backups, exports, database dumps and decrypted archives
+*.bsmbackup
+*.dump
+*.sql
+bansamiti-*.zip
+backups/
+backup-temp/

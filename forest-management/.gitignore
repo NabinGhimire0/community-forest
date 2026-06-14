@@ -1,0 +1,12 @@
+.env
+uploads/*
+!uploads/.gitkeep
+cmd/api/uploads/
+bin/
+*.log
+coverage.out
+*.bsmbackup
+*.dump
+*.sql
+backups/
+backup-temp/

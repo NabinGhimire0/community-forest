@@ -33,6 +33,7 @@ type SamitiSetting struct {
 
 type SamitiHead struct {
 	ID          uint       `gorm:"primaryKey" json:"id"`
+	UserID      *uint      `gorm:"uniqueIndex" json:"user_id"`
 	Name        string     `gorm:"size:255;not null" json:"name"`
 	Post        string     `gorm:"size:50;not null" json:"post"` // chairperson, secretary, treasurer, member
 	Phone       *string    `gorm:"size:20" json:"phone"`
@@ -45,6 +46,11 @@ type SamitiHead struct {
 	Remarks     *string    `gorm:"type:text" json:"remarks"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+
+	// Optional login account for committee members who work as admin/staff.
+	User                      *User `gorm:"foreignKey:UserID;constraint:OnUpdate:CASCADE,OnDelete:SET NULL;" json:"user,omitempty"`
+	BootstrapAdminDeactivated bool  `gorm:"-" json:"bootstrap_admin_deactivated,omitempty"`
+	ExistingAccountPromoted   bool  `gorm:"-" json:"existing_account_promoted,omitempty"`
 }
 
 // ==========================================
@@ -52,18 +58,29 @@ type SamitiHead struct {
 // ==========================================
 
 type User struct {
-	ID              uint       `gorm:"primaryKey" json:"id"`
-	Name            string     `gorm:"size:255;not null" json:"name"`
-	Email           *string    `gorm:"size:255;uniqueIndex" json:"email"`
-	Phone           string     `gorm:"size:20;uniqueIndex;not null" json:"phone"`
-	Password        string     `gorm:"size:255;not null" json:"-"`           // json:"-" hides password from API responses
-	Role            string     `gorm:"size:20;default:member" json:"role"`   // admin, staff, member
-	Status          string     `gorm:"size:20;default:active" json:"status"` // active, inactive
-	EmailVerifiedAt *time.Time `json:"email_verified_at"`
-	PhoneVerifiedAt *time.Time `json:"phone_verified_at"`
-	RememberToken   *string    `gorm:"size:255" json:"remember_token"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID                  uint       `gorm:"primaryKey" json:"id"`
+	Name                string     `gorm:"size:255;not null" json:"name"`
+	Email               *string    `gorm:"size:255;uniqueIndex" json:"email"`
+	Phone               string     `gorm:"size:20;uniqueIndex;not null" json:"phone"`
+	Password            string     `gorm:"size:255;not null" json:"-"`           // json:"-" hides password from API responses
+	Role                string     `gorm:"size:20;default:member" json:"role"`   // admin, staff, member
+	Status              string     `gorm:"size:20;default:active" json:"status"` // active, inactive
+	IsBootstrapAdmin    bool       `gorm:"default:false;index" json:"is_bootstrap_admin"`
+	MustChangePassword  bool       `gorm:"default:false" json:"must_change_password"`
+	FailedLoginAttempts int        `gorm:"default:0" json:"-"`
+	LastFailedLoginAt   *time.Time `json:"-"`
+	LockedUntil         *time.Time `gorm:"index" json:"locked_until,omitempty"`
+	LastLoginAt         *time.Time `json:"last_login_at,omitempty"`
+	PasswordChangedAt   *time.Time `json:"password_changed_at,omitempty"`
+	MFAEnabled          bool       `gorm:"default:false" json:"mfa_enabled"`
+	MFASecretEncrypted  *string    `gorm:"type:text" json:"-"`
+	MFABackupCodes      *string    `gorm:"type:jsonb" json:"-"`
+	MFALastUsedStep     int64      `gorm:"default:0" json:"-"`
+	EmailVerifiedAt     *time.Time `json:"email_verified_at"`
+	PhoneVerifiedAt     *time.Time `json:"phone_verified_at"`
+	RememberToken       *string    `gorm:"size:255" json:"-"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
 
 	// Relations
 	Member *Member `gorm:"foreignKey:UserID" json:"member,omitempty"`
@@ -75,27 +92,46 @@ func (u *User) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
+// UserSession stores only SHA-256 hashes of opaque browser credentials. The
+// raw session and CSRF tokens exist only in secure cookies on the client.
+type UserSession struct {
+	ID         uint       `gorm:"primaryKey" json:"id"`
+	UserID     uint       `gorm:"not null;index" json:"user_id"`
+	TokenHash  string     `gorm:"size:64;not null;uniqueIndex" json:"-"`
+	CSRFHash   string     `gorm:"size:64;not null" json:"-"`
+	IPAddress  *string    `gorm:"size:64" json:"ip_address,omitempty"`
+	UserAgent  *string    `gorm:"size:500" json:"user_agent,omitempty"`
+	ExpiresAt  time.Time  `gorm:"not null;index" json:"expires_at"`
+	LastSeenAt time.Time  `gorm:"not null;index" json:"last_seen_at"`
+	RevokedAt  *time.Time `gorm:"index" json:"revoked_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+
+	User *User `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE" json:"user,omitempty"`
+}
+
 // ==========================================
 // MEMBERS
 // ==========================================
 
 type Member struct {
-	ID             uint       `gorm:"primaryKey" json:"id"`
-	UserID         *uint      `gorm:"uniqueIndex" json:"user_id"` // FK → users.id
-	MembershipNo   string     `gorm:"size:50;uniqueIndex;not null" json:"membership_no"`
-	Name           string     `gorm:"size:255;not null" json:"name"`
-	AssistantName  string     `gorm:"size:255;not null" json:"assistant_name"`
-	FatherName     string     `gorm:"size:255;not null" json:"father_name"`
-	WardNo         int        `gorm:"not null" json:"ward_no"`
-	Tole           string     `gorm:"size:255;not null" json:"tole"`
-	Phone          *string    `gorm:"size:20" json:"phone"`
-	Photo          *string    `gorm:"size:500" json:"photo"`
-	AssistantPhoto *string    `gorm:"size:500" json:"assistant_photo"`
-	JoinedDate     *time.Time `json:"joined_date"`
-	Status         string     `gorm:"size:20;default:active" json:"status"`
-	Remarks        *string    `gorm:"type:text" json:"remarks"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ID             uint           `gorm:"primaryKey" json:"id"`
+	UserID         *uint          `gorm:"uniqueIndex" json:"user_id"` // FK → users.id
+	MembershipNo   string         `gorm:"size:50;uniqueIndex;not null" json:"membership_no"`
+	Name           string         `gorm:"size:255;not null" json:"name"`
+	AssistantName  string         `gorm:"size:255;not null" json:"assistant_name"`
+	FatherName     string         `gorm:"size:255;not null" json:"father_name"`
+	WardNo         int            `gorm:"not null" json:"ward_no"`
+	Tole           string         `gorm:"size:255;not null" json:"tole"`
+	Phone          *string        `gorm:"size:20" json:"phone"`
+	Photo          *string        `gorm:"size:500" json:"photo"`
+	AssistantPhoto *string        `gorm:"size:500" json:"assistant_photo"`
+	JoinedDate     *time.Time     `json:"joined_date"`
+	Status         string         `gorm:"size:20;default:active" json:"status"`
+	Remarks        *string        `gorm:"type:text" json:"remarks"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+	DeletedAt      gorm.DeletedAt `gorm:"index" json:"-"`
 
 	// Relations
 	User          *User          `gorm:"foreignKey:UserID" json:"user,omitempty"`
@@ -131,6 +167,12 @@ type FiscalYear struct {
 	IsActive  bool      `gorm:"default:false" json:"is_active"`
 	CreatedAt time.Time `json:"created_at"`
 
+	// Populated only when a fiscal year is activated.
+	CarriedStockItems  int `gorm:"-" json:"carried_stock_items,omitempty"`
+	CarriedRateItems   int `gorm:"-" json:"carried_rate_items,omitempty"`
+	CarriedFeeItems    int `gorm:"-" json:"carried_fee_items,omitempty"`
+	AssignedMemberFees int `gorm:"-" json:"assigned_member_fees,omitempty"`
+
 	// Relations
 	FeeSettings   []FeeSetting   `gorm:"foreignKey:FiscalYearID" json:"fee_settings,omitempty"`
 	Stocks        []Stock        `gorm:"foreignKey:FiscalYearID" json:"stocks,omitempty"`
@@ -139,9 +181,11 @@ type FiscalYear struct {
 
 type FeeSetting struct {
 	ID            uint      `gorm:"primaryKey" json:"id"`
-	FiscalYearID  uint      `gorm:"not null;index" json:"fiscal_year_id"`
-	MembershipFee float64   `gorm:"not null" json:"membership_fee"`
+	FiscalYearID  uint      `gorm:"not null;uniqueIndex:idx_fee_fiscal_year" json:"fiscal_year_id"`
+	MembershipFee float64   `gorm:"type:numeric(14,2);not null" json:"membership_fee"`
 	CreatedAt     time.Time `json:"created_at"`
+
+	FiscalYear *FiscalYear `gorm:"foreignKey:FiscalYearID" json:"fiscal_year,omitempty"`
 }
 
 // ==========================================
@@ -170,9 +214,9 @@ type ResourceItem struct {
 
 type ResourceRate struct {
 	ID             uint      `gorm:"primaryKey" json:"id"`
-	ResourceItemID uint      `gorm:"not null;index" json:"resource_item_id"`
-	FiscalYearID   uint      `gorm:"not null;index" json:"fiscal_year_id"`
-	RatePerUnit    float64   `gorm:"not null" json:"rate_per_unit"`
+	ResourceItemID uint      `gorm:"not null;index;uniqueIndex:idx_rate_item_fy" json:"resource_item_id"`
+	FiscalYearID   uint      `gorm:"not null;index;uniqueIndex:idx_rate_item_fy" json:"fiscal_year_id"`
+	RatePerUnit    float64   `gorm:"type:numeric(14,2);not null" json:"rate_per_unit"`
 	CreatedAt      time.Time `json:"created_at"`
 
 	// Relations
@@ -182,10 +226,11 @@ type ResourceRate struct {
 
 type Stock struct {
 	ID                uint    `gorm:"primaryKey" json:"id"`
-	ResourceItemID    uint    `gorm:"not null;index" json:"resource_item_id"`
-	FiscalYearID      uint    `gorm:"not null;index" json:"fiscal_year_id"`
+	ResourceItemID    uint    `gorm:"not null;index;uniqueIndex:idx_stock_item_fy" json:"resource_item_id"`
+	FiscalYearID      uint    `gorm:"not null;index;uniqueIndex:idx_stock_item_fy" json:"fiscal_year_id"`
 	TotalQuantity     float64 `gorm:"not null" json:"total_quantity"`
 	RemainingQuantity float64 `gorm:"not null" json:"remaining_quantity"`
+	ReservedQuantity  float64 `gorm:"not null;default:0" json:"reserved_quantity"`
 
 	// Relations
 	Item       *ResourceItem `gorm:"foreignKey:ResourceItemID" json:"item,omitempty"`
@@ -225,19 +270,31 @@ type Request struct {
 // ==========================================
 
 type Payment struct {
-	ID            uint       `gorm:"primaryKey" json:"id"`
-	MemberID      uint       `gorm:"not null;index" json:"member_id"`
-	RequestID     *uint      `json:"request_id"`
-	Amount        float64    `gorm:"not null" json:"amount"`
-	PaymentMethod string     `gorm:"size:20;not null" json:"payment_method"` // esewa, khalti, cash
-	TransactionID *string    `gorm:"size:255" json:"transaction_id"`
-	Status        string     `gorm:"size:20;default:pending" json:"status"` // pending, paid, failed
-	PaidAt        *time.Time `json:"paid_at"`
-	CreatedAt     time.Time  `json:"created_at"`
+	ID                     uint       `gorm:"primaryKey" json:"id"`
+	MemberID               uint       `gorm:"not null;index" json:"member_id"`
+	RequestID              *uint      `gorm:"index" json:"request_id"`
+	LedgerTransactionID    *uint      `gorm:"index" json:"ledger_transaction_id"`
+	Amount                 float64    `gorm:"type:numeric(14,2);not null" json:"amount"`
+	PaymentMethod          string     `gorm:"size:20;not null;index" json:"payment_method"` // cash, esewa
+	TransactionID          *string    `gorm:"size:255" json:"transaction_id"`               // legacy/external reference
+	GatewayTransactionUUID *string    `gorm:"size:100;uniqueIndex" json:"gateway_transaction_uuid"`
+	GatewayReferenceID     *string    `gorm:"size:100;index" json:"gateway_reference_id"`
+	GatewayStatus          *string    `gorm:"size:30" json:"gateway_status"`
+	GatewayResponse        *string    `gorm:"type:text" json:"-"`
+	ReceiptNo              *string    `gorm:"size:100;uniqueIndex" json:"receipt_no"`
+	Remarks                *string    `gorm:"type:text" json:"remarks"`
+	Status                 string     `gorm:"size:20;default:pending;index" json:"status"` // pending, paid, failed, canceled
+	CreatedBy              *uint      `gorm:"index" json:"created_by"`
+	PaidAt                 *time.Time `json:"paid_at"`
+	VerifiedAt             *time.Time `json:"verified_at"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              time.Time  `json:"updated_at"`
 
 	// Relations
-	Member  *Member  `gorm:"foreignKey:MemberID" json:"member,omitempty"`
-	Request *Request `gorm:"foreignKey:RequestID" json:"request,omitempty"`
+	Member            *Member      `gorm:"foreignKey:MemberID" json:"member,omitempty"`
+	Request           *Request     `gorm:"foreignKey:RequestID" json:"request,omitempty"`
+	LedgerTransaction *Transaction `gorm:"foreignKey:LedgerTransactionID" json:"ledger_transaction,omitempty"`
+	Creator           *User        `gorm:"foreignKey:CreatedBy" json:"creator,omitempty"`
 }
 
 // ==========================================
@@ -245,25 +302,40 @@ type Payment struct {
 // ==========================================
 
 type Transaction struct {
-	ID              uint      `gorm:"primaryKey" json:"id"`
-	MemberID        uint      `gorm:"not null;index" json:"member_id"`
-	FiscalYearID    uint      `gorm:"not null;index" json:"fiscal_year_id"`
-	ResourceItemID  *uint     `json:"resource_item_id"`
-	Type            string    `gorm:"size:50;not null" json:"type"` // membership_fee, resource_sale
-	Quantity        *float64  `json:"quantity"`
-	RatePerUnit     *float64  `json:"rate_per_unit"`
-	TotalAmount     float64   `gorm:"not null" json:"total_amount"`
-	AmountPaid      float64   `gorm:"default:0" json:"amount_paid"`
-	AmountRemaining float64   `gorm:"not null" json:"amount_remaining"`
-	ReceiptNo       string    `gorm:"size:100;uniqueIndex;not null" json:"receipt_no"`
-	Date            time.Time `gorm:"not null" json:"date"`
-	Remarks         *string   `gorm:"type:text" json:"remarks"`
-	CreatedAt       time.Time `json:"created_at"`
+	ID                uint         `gorm:"primaryKey" json:"id"`
+	MemberID          uint         `gorm:"not null;index" json:"member_id"`
+	FiscalYearID      uint         `gorm:"not null;index" json:"fiscal_year_id"`
+	ResourceItemID    *uint        `gorm:"index" json:"resource_item_id"`
+	RequestID         *uint        `gorm:"index" json:"request_id"`
+	Type              string       `gorm:"size:50;not null;index" json:"type"`
+	Source            string       `gorm:"size:30;default:system;index" json:"source"`
+	RecordStatus      string       `gorm:"size:20;default:verified;index" json:"record_status"` // draft, verified, reversed
+	Quantity          *float64     `json:"quantity"`
+	RatePerUnit       *float64     `json:"rate_per_unit"`
+	TotalAmount       float64      `gorm:"type:numeric(14,2);not null" json:"total_amount"`
+	AmountPaid        float64      `gorm:"type:numeric(14,2);default:0" json:"amount_paid"`
+	AmountRemaining   float64      `gorm:"type:numeric(14,2);not null" json:"amount_remaining"`
+	ReceiptNo         string       `gorm:"size:100;uniqueIndex;not null" json:"receipt_no"`
+	PhysicalReference *string      `gorm:"size:255" json:"physical_reference"`
+	Date              time.Time    `gorm:"not null" json:"date"`
+	Remarks           *string      `gorm:"type:text" json:"remarks"`
+	EnteredBy         *uint        `gorm:"index" json:"entered_by"`
+	VerifiedBy        *uint        `gorm:"index" json:"verified_by"`
+	VerifiedAt        *time.Time   `json:"verified_at"`
+	ReversedBy        *uint        `gorm:"index" json:"reversed_by"`
+	ReversedAt        *time.Time   `json:"reversed_at"`
+	ReversalReason    *string      `gorm:"type:text" json:"reversal_reason"`
+	CreatedAt         time.Time    `json:"created_at"`
+	UpdatedAt         time.Time    `json:"updated_at"`
+	Documents         []FileUpload `gorm:"-" json:"documents,omitempty"`
 
 	// Relations
-	Member       *Member       `gorm:"foreignKey:MemberID" json:"member,omitempty"`
-	FiscalYear   *FiscalYear   `gorm:"foreignKey:FiscalYearID" json:"fiscal_year,omitempty"`
-	ResourceItem *ResourceItem `gorm:"foreignKey:ResourceItemID" json:"resource_item,omitempty"`
+	Member         *Member       `gorm:"foreignKey:MemberID" json:"member,omitempty"`
+	FiscalYear     *FiscalYear   `gorm:"foreignKey:FiscalYearID" json:"fiscal_year,omitempty"`
+	ResourceItem   *ResourceItem `gorm:"foreignKey:ResourceItemID" json:"resource_item,omitempty"`
+	Request        *Request      `gorm:"foreignKey:RequestID" json:"request,omitempty"`
+	EnteredByUser  *User         `gorm:"foreignKey:EnteredBy" json:"entered_by_user,omitempty"`
+	VerifiedByUser *User         `gorm:"foreignKey:VerifiedBy" json:"verified_by_user,omitempty"`
 }
 
 // ==========================================
@@ -281,19 +353,21 @@ type ExpenseCategory struct {
 }
 
 type Expense struct {
-	ID            uint      `gorm:"primaryKey" json:"id"`
-	FiscalYearID  uint      `gorm:"not null;index" json:"fiscal_year_id"`
-	CategoryID    uint      `gorm:"not null;index" json:"category_id"`
-	Title         string    `gorm:"size:255;not null" json:"title"`
-	Amount        float64   `gorm:"not null" json:"amount"`
-	ExpenseDate   time.Time `gorm:"not null" json:"expense_date"`
-	PaymentMethod string    `gorm:"size:20;not null" json:"payment_method"` // cash, bank, online
-	PaidTo        string    `gorm:"size:255;not null" json:"paid_to"`
-	ReceiptNo     *string   `gorm:"size:100" json:"receipt_no"`
-	BillPhoto     *string   `gorm:"size:500" json:"bill_photo"`
-	Remarks       *string   `gorm:"type:text" json:"remarks"`
-	CreatedBy     uint      `gorm:"not null" json:"created_by"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID            uint           `gorm:"primaryKey" json:"id"`
+	FiscalYearID  uint           `gorm:"not null;index" json:"fiscal_year_id"`
+	CategoryID    uint           `gorm:"not null;index" json:"category_id"`
+	Title         string         `gorm:"size:255;not null" json:"title"`
+	Amount        float64        `gorm:"type:numeric(14,2);not null" json:"amount"`
+	ExpenseDate   time.Time      `gorm:"not null" json:"expense_date"`
+	PaymentMethod string         `gorm:"size:20;not null" json:"payment_method"` // cash, bank, online
+	PaidTo        string         `gorm:"size:255;not null" json:"paid_to"`
+	ReceiptNo     *string        `gorm:"size:100" json:"receipt_no"`
+	BillPhoto     *string        `gorm:"size:500" json:"bill_photo"`
+	Remarks       *string        `gorm:"type:text" json:"remarks"`
+	CreatedBy     uint           `gorm:"not null" json:"created_by"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	DeletedAt     gorm.DeletedAt `gorm:"index" json:"-"`
 
 	// Relations
 	FiscalYear *FiscalYear      `gorm:"foreignKey:FiscalYearID" json:"fiscal_year,omitempty"`
@@ -306,21 +380,22 @@ type Expense struct {
 // ==========================================
 
 type Fine struct {
-	ID               uint      `gorm:"primaryKey" json:"id"`
-	FiscalYearID     uint      `gorm:"not null;index" json:"fiscal_year_id"`
-	MemberID         *uint     `json:"member_id"`
-	Name             string    `gorm:"size:255" json:"name"` // for non-member violators
-	ViolationType    string    `gorm:"size:255;not null" json:"violation_type"`
-	Description      *string   `gorm:"type:text" json:"description"`
-	FineAmount       float64   `gorm:"not null" json:"fine_amount"`
-	IncidentDate     time.Time `gorm:"not null" json:"incident_date"`
-	Status           string    `gorm:"size:20;default:pending" json:"status"` // pending, paid, waived
-	PaymentReference *string   `gorm:"size:255" json:"payment_reference"`
-	Photo            *string   `gorm:"size:500" json:"photo"`
-	Remarks          *string   `gorm:"type:text" json:"remarks"`
-	CreatedBy        uint      `gorm:"not null" json:"created_by"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID               uint           `gorm:"primaryKey" json:"id"`
+	FiscalYearID     uint           `gorm:"not null;index" json:"fiscal_year_id"`
+	MemberID         *uint          `json:"member_id"`
+	Name             string         `gorm:"size:255" json:"name"` // for non-member violators
+	ViolationType    string         `gorm:"size:255;not null" json:"violation_type"`
+	Description      *string        `gorm:"type:text" json:"description"`
+	FineAmount       float64        `gorm:"type:numeric(14,2);not null" json:"fine_amount"`
+	IncidentDate     time.Time      `gorm:"not null" json:"incident_date"`
+	Status           string         `gorm:"size:20;default:pending" json:"status"` // pending, paid, waived
+	PaymentReference *string        `gorm:"size:255" json:"payment_reference"`
+	Photo            *string        `gorm:"size:500" json:"photo"`
+	Remarks          *string        `gorm:"type:text" json:"remarks"`
+	CreatedBy        uint           `gorm:"not null" json:"created_by"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+	DeletedAt        gorm.DeletedAt `gorm:"index" json:"-"`
 
 	// Relations
 	FiscalYear *FiscalYear `gorm:"foreignKey:FiscalYearID" json:"fiscal_year,omitempty"`
@@ -345,6 +420,7 @@ type Letter struct {
 	SentDate     *time.Time `json:"sent_date"`
 	DocumentFile *string    `gorm:"size:500" json:"document_file"`
 	Remarks      *string    `gorm:"type:text" json:"remarks"`
+	Status       string     `gorm:"size:20;not null;default:active;index" json:"status"`
 	CreatedBy    uint       `gorm:"not null" json:"created_by"`
 	CreatedAt    time.Time  `json:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at"`
@@ -394,6 +470,21 @@ type Notification struct {
 	User *User `gorm:"foreignKey:UserID" json:"user,omitempty"`
 }
 
+// NotificationReceipt isolates read state per user for broadcast and
+// role-targeted notifications.
+type NotificationReceipt struct {
+	ID             uint       `gorm:"primaryKey" json:"id"`
+	NotificationID uint       `gorm:"not null;uniqueIndex:idx_notification_user" json:"notification_id"`
+	UserID         uint       `gorm:"not null;uniqueIndex:idx_notification_user;index" json:"user_id"`
+	IsRead         bool       `gorm:"default:false;index" json:"is_read"`
+	ReadAt         *time.Time `json:"read_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+
+	Notification *Notification `gorm:"foreignKey:NotificationID;constraint:OnDelete:CASCADE" json:"notification,omitempty"`
+	User         *User         `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE" json:"user,omitempty"`
+}
+
 // ==========================================
 // FILE UPLOADS
 // ==========================================
@@ -402,7 +493,7 @@ type FileUpload struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`
 	OriginalName string    `gorm:"size:255;not null" json:"original_name"`
 	StoredName   string    `gorm:"size:255;not null" json:"stored_name"`
-	FilePath     string    `gorm:"size:500;not null" json:"file_path"`
+	FilePath     string    `gorm:"size:500;not null" json:"-"`
 	FileURL      string    `gorm:"size:500;not null" json:"file_url"`
 	MimeType     string    `gorm:"size:100;not null" json:"mime_type"`
 	FileSize     int64     `gorm:"not null" json:"file_size"`             // bytes
@@ -410,6 +501,8 @@ type FileUpload struct {
 	Entity       *string   `gorm:"size:100;index" json:"entity"`          // member, expense, letter
 	EntityID     *uint     `gorm:"index" json:"entity_id"`
 	UploadedBy   uint      `gorm:"not null;index" json:"uploaded_by"`
+	Visibility   string    `gorm:"size:20;not null;default:private;index" json:"visibility"`
+	SHA256       *string   `gorm:"size:64;index" json:"sha256,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 
 	// Relations

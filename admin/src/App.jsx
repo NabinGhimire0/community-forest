@@ -1,60 +1,160 @@
-import { Routes, Route, Navigate } from "react-router-dom";
-import { useEffect } from "react";
-import { useSelector, useDispatch } from "react-redux";
+import { lazy, Suspense, useEffect } from "react";
+import { Navigate, Route, Routes } from "react-router-dom";
+import { useDispatch, useSelector } from "react-redux";
 import { loadProfile } from "./redux/slices/authSlice";
+import {
+  fetchAppSettings,
+  fetchPublicCommittee,
+} from "./redux/slices/appSettingsSlice";
 import AdminLayout from "./components/layout/AdminLayout";
 import ProtectedRoute from "./components/common/ProtectedRoute";
+import LoadingSpinner from "./components/common/LoadingSpinner";
 import { ToastProvider } from "./components/common/Toast";
-import Login from "./pages/public/Login";
-import Dashboard from "./pages/admin/Dashboard";
-import Members from "./pages/admin/Members";
-import Requests from "./pages/admin/Requests";
-import Payments from "./pages/admin/Payments";
-import Transactions from "./pages/admin/Transactions";
-import Expenses from "./pages/admin/Expenses";
-import Fines from "./pages/admin/Fines";
-import Letters from "./pages/admin/Letters";
-import Samiti from "./pages/admin/Samiti";
-import Resources from "./pages/admin/Resources";
-import FiscalYears from "./pages/admin/FiscalYears";
-import Reports from "./pages/admin/Reports";
+import Landing from "./pages/public/landing";
+import Login from "./pages/public/login";
+import EsewaResult from "./pages/public/EsewaResult";
+import NotFound from "./pages/NotFound";
+
+const Dashboard = lazy(() => import("./pages/admin/Dashboard"));
+const Members = lazy(() => import("./pages/admin/Members"));
+const Requests = lazy(() => import("./pages/admin/Requests"));
+const Payments = lazy(() => import("./pages/admin/Payments"));
+const Transactions = lazy(() => import("./pages/admin/Transactions"));
+const Expenses = lazy(() => import("./pages/admin/Expenses"));
+const Fines = lazy(() => import("./pages/admin/Fines"));
+const Letters = lazy(() => import("./pages/admin/Letters"));
+const Samiti = lazy(() => import("./pages/admin/Samiti"));
+const Resources = lazy(() => import("./pages/admin/Resources"));
+const FiscalYears = lazy(() => import("./pages/admin/FiscalYears"));
+const Reports = lazy(() => import("./pages/admin/Reports"));
+const Profile = lazy(() => import("./pages/admin/Profile"));
+const SystemData = lazy(() => import("./pages/admin/SystemData"));
+
+const adminAndStaff = ["admin", "staff"];
+
+function RoleProtected({ roles, children }) {
+  return <ProtectedRoute roles={roles}>{children}</ProtectedRoute>;
+}
+
+function PageFallback() {
+  return <LoadingSpinner text="Loading page..." />;
+}
 
 export default function App() {
   const dispatch = useDispatch();
-  const { token } = useSelector((state) => state.auth);
+  const settings = useSelector((state) => state.appSettings.settings);
 
   useEffect(() => {
-    if (token) dispatch(loadProfile());
-  }, [token, dispatch]);
+    dispatch(fetchAppSettings());
+    dispatch(fetchPublicCommittee());
+  }, [dispatch]);
+
+  useEffect(() => {
+    dispatch(loadProfile());
+  }, [dispatch]);
+
+  useEffect(() => {
+    document.title = settings?.name || "Community Forestry Management System";
+  }, [settings?.name]);
 
   return (
     <ToastProvider>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route
-          path="/"
-          element={
-            <ProtectedRoute>
-              <AdminLayout />
-            </ProtectedRoute>
-          }
-        >
-          <Route index element={<Navigate to="/dashboard" replace />} />
-          <Route path="dashboard" element={<Dashboard />} />
-          <Route path="members" element={<Members />} />
-          <Route path="requests" element={<Requests />} />
-          <Route path="payments" element={<Payments />} />
-          <Route path="transactions" element={<Transactions />} />
-          <Route path="expenses" element={<Expenses />} />
-          <Route path="fines" element={<Fines />} />
-          <Route path="letters" element={<Letters />} />
-          <Route path="samiti" element={<Samiti />} />
-          <Route path="resources" element={<Resources />} />
-          <Route path="fiscal-years" element={<FiscalYears />} />
-          <Route path="reports" element={<Reports />} />
-        </Route>
-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
-      </Routes>
+      <Suspense fallback={<PageFallback />}>
+        <Routes>
+          <Route path="/" element={<Landing />} />
+          <Route path="/login" element={<Login />} />
+          <Route path="/payments/esewa/result" element={<EsewaResult />} />
+
+          <Route
+            element={
+              <ProtectedRoute>
+                <AdminLayout />
+              </ProtectedRoute>
+            }
+          >
+            <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="/profile" element={<Profile />} />
+            <Route
+              path="/members"
+              element={
+                <RoleProtected roles={adminAndStaff}>
+                  <Members />
+                </RoleProtected>
+              }
+            />
+            <Route path="/requests" element={<Requests />} />
+            <Route path="/payments" element={<Payments />} />
+            <Route path="/transactions" element={<Transactions />} />
+            <Route
+              path="/expenses"
+              element={
+                <RoleProtected roles={adminAndStaff}>
+                  <Expenses />
+                </RoleProtected>
+              }
+            />
+            <Route
+              path="/fines"
+              element={
+                <RoleProtected roles={adminAndStaff}>
+                  <Fines />
+                </RoleProtected>
+              }
+            />
+            <Route
+              path="/letters"
+              element={
+                <RoleProtected roles={adminAndStaff}>
+                  <Letters />
+                </RoleProtected>
+              }
+            />
+            <Route
+              path="/resources"
+              element={
+                <RoleProtected roles={adminAndStaff}>
+                  <Resources />
+                </RoleProtected>
+              }
+            />
+            <Route
+              path="/fiscal-years"
+              element={
+                <RoleProtected roles={adminAndStaff}>
+                  <FiscalYears />
+                </RoleProtected>
+              }
+            />
+            <Route
+              path="/reports"
+              element={
+                <RoleProtected roles={adminAndStaff}>
+                  <Reports />
+                </RoleProtected>
+              }
+            />
+            <Route
+              path="/system-data"
+              element={
+                <RoleProtected roles={["admin"]}>
+                  <SystemData />
+                </RoleProtected>
+              }
+            />
+            <Route
+              path="/samiti"
+              element={
+                <RoleProtected roles={["admin"]}>
+                  <Samiti />
+                </RoleProtected>
+              }
+            />
+          </Route>
+
+          <Route path="/app" element={<Navigate to="/dashboard" replace />} />
+          <Route path="*" element={<NotFound />} />
+        </Routes>
+      </Suspense>
     </ToastProvider>
   );
 }

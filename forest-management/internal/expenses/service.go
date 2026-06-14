@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
 
 	"forest-management/internal/models"
+	"forest-management/pkg/fileutil"
 	"forest-management/pkg/response"
 
 	"gorm.io/gorm"
@@ -25,6 +25,9 @@ func NewExpenseService(db *gorm.DB) *ExpenseService {
 // ==================== Expense Methods ====================
 
 func (s *ExpenseService) CreateExpense(adminUserID uint, input CreateExpenseInput) (*models.Expense, error) {
+	if input.Amount <= 0 {
+		return nil, errors.New("expense amount must be greater than zero")
+	}
 	expenseDate, err := time.Parse("2006-01-02", input.ExpenseDate)
 	if err != nil {
 		return nil, errors.New("invalid expense date format. Use YYYY-MM-DD")
@@ -111,7 +114,7 @@ func (s *ExpenseService) GetExpenseByID(id uint) (*models.Expense, error) {
 	return &expense, err
 }
 
-func (s *ExpenseService) UpdateExpense(id uint, input UpdateExpenseInput) (*models.Expense, error) {
+func (s *ExpenseService) UpdateExpense(id uint, actorUserID uint, input UpdateExpenseInput) (*models.Expense, error) {
 	var expense models.Expense
 	if err := s.db.First(&expense, id).Error; err != nil {
 		return nil, errors.New("expense not found")
@@ -137,6 +140,9 @@ func (s *ExpenseService) UpdateExpense(id uint, input UpdateExpenseInput) (*mode
 		updates["title"] = *input.Title
 	}
 	if input.Amount != nil {
+		if *input.Amount <= 0 {
+			return nil, errors.New("expense amount must be greater than zero")
+		}
 		updates["amount"] = *input.Amount
 	}
 	if input.ExpenseDate != nil {
@@ -172,18 +178,14 @@ func (s *ExpenseService) UpdateExpense(id uint, input UpdateExpenseInput) (*mode
 	return &expense, nil
 }
 
-func (s *ExpenseService) DeleteExpense(id uint) error {
+func (s *ExpenseService) DeleteExpense(id uint, actorUserID uint) error {
 	var expense models.Expense
 	if err := s.db.First(&expense, id).Error; err != nil {
 		return errors.New("expense not found")
 	}
 
-	// Delete associated bill photo if exists
-	if expense.BillPhoto != nil && *expense.BillPhoto != "" {
-		filePath := "." + *expense.BillPhoto
-		os.Remove(filePath)
-	}
-
+	// Financial evidence is preserved. GORM performs a soft delete so the row
+	// remains recoverable in the database backup and audit history.
 	return s.db.Delete(&expense).Error
 }
 
@@ -267,39 +269,13 @@ func (s *ExpenseService) UploadBillPhoto(expenseID uint, file io.Reader, filenam
 	if err := s.db.First(&expense, expenseID).Error; err != nil {
 		return "", errors.New("expense not found")
 	}
-
-	// Create uploads directory if not exists
-	uploadDir := "./uploads/expenses"
-	if err := os.MkdirAll(uploadDir, os.ModePerm); err != nil {
-		return "", fmt.Errorf("failed to create upload directory: %w", err)
-	}
-
-	// Generate unique filename
-	ext := filepath.Ext(filename)
-	if ext == "" {
-		ext = ".jpg"
-	}
-	uniqueName := fmt.Sprintf("expense_%d_%d%s", expenseID, time.Now().UnixNano(), ext)
-	filePath := filepath.Join(uploadDir, uniqueName)
-	fileURL := fmt.Sprintf("/uploads/expenses/%s", uniqueName)
-
-	// Save file
-	dst, err := os.Create(filePath)
+	saved, err := fileutil.Save(file, "expenses", fmt.Sprintf("expense-%d", expenseID), fileutil.EvidencePolicy)
 	if err != nil {
-		return "", fmt.Errorf("failed to create file: %w", err)
+		return "", err
 	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, file); err != nil {
-		os.Remove(filePath)
-		return "", fmt.Errorf("failed to save file: %w", err)
-	}
-
-	// Update expense with bill photo URL
-	if err := s.db.Model(&expense).Update("bill_photo", fileURL).Error; err != nil {
-		os.Remove(filePath)
+	if err := s.db.Model(&expense).Update("bill_photo", saved.URL).Error; err != nil {
+		_ = os.Remove(saved.Path)
 		return "", fmt.Errorf("failed to update expense: %w", err)
 	}
-
-	return fileURL, nil
+	return saved.URL, nil
 }

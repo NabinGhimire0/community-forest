@@ -3,7 +3,9 @@ package fines
 import (
 	"strconv"
 
+	"forest-management/internal/audit"
 	"forest-management/pkg/middleware"
+	"forest-management/pkg/requestutil"
 	"forest-management/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -20,8 +22,8 @@ func NewFineHandler(service *FineService) *FineHandler {
 type CreateFineInput struct {
 	FiscalYearID  uint    `json:"fiscal_year_id" binding:"required"`
 	MemberID      *uint   `json:"member_id"`
-	Name          string  `json:"name"` // For non-member violators
-	ViolationType string  `json:"violation_type" binding:"required"`
+	Name          string  `json:"name" binding:"omitempty,max=255"` // For non-member violators
+	ViolationType string  `json:"violation_type" binding:"required,max=255"`
 	Description   *string `json:"description"`
 	FineAmount    float64 `json:"fine_amount" binding:"required,min=0.01"`
 	IncidentDate  string  `json:"incident_date" binding:"required"`
@@ -64,12 +66,13 @@ func (h *FineHandler) Create(c *gin.Context) {
 		return
 	}
 
+	actorID := userID
+	audit.CreateAuditEntry(h.service.db, &actorID, "create", "fine", &fine.ID, nil, fine, c.ClientIP(), c.Request.UserAgent(), "Fine recorded")
 	response.Created(c, "Fine recorded successfully", fine)
 }
 
 func (h *FineHandler) List(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
+	page, perPage := requestutil.Pagination(c)
 	status := c.Query("status")
 	fiscalYearID := c.Query("fiscal_year_id")
 	memberID := c.Query("member_id")
@@ -108,6 +111,8 @@ func (h *FineHandler) Update(c *gin.Context) {
 	}
 	userID := middleware.GetUserID(c)
 
+	before, _ := h.service.GetFineByID(uint(id))
+
 	var input UpdateFineInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		response.BadRequest(c, "Invalid fine data")
@@ -120,6 +125,8 @@ func (h *FineHandler) Update(c *gin.Context) {
 		return
 	}
 
+	actorID := userID
+	audit.CreateAuditEntry(h.service.db, &actorID, "update", "fine", &fine.ID, before, fine, c.ClientIP(), c.Request.UserAgent(), "Pending fine updated")
 	response.Success(c, "Fine updated", fine)
 }
 
@@ -130,6 +137,8 @@ func (h *FineHandler) UpdateStatus(c *gin.Context) {
 		return
 	}
 	userID := middleware.GetUserID(c)
+
+	before, _ := h.service.GetFineByID(uint(id))
 
 	var input UpdateFineStatusInput
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -143,6 +152,8 @@ func (h *FineHandler) UpdateStatus(c *gin.Context) {
 		return
 	}
 
+	actorID := userID
+	audit.CreateAuditEntry(h.service.db, &actorID, "status_change", "fine", &fine.ID, before, fine, c.ClientIP(), c.Request.UserAgent(), "Fine status changed")
 	response.Success(c, "Fine status updated", fine)
 }
 
@@ -153,12 +164,16 @@ func (h *FineHandler) Delete(c *gin.Context) {
 		return
 	}
 
+	before, _ := h.service.GetFineByID(uint(id))
 	if err := h.service.DeleteFine(uint(id)); err != nil {
 		response.Error(c, 500, err.Error())
 		return
 	}
 
-	response.Success(c, "Fine deleted", nil)
+	actorID := middleware.GetUserID(c)
+	entityID := uint(id)
+	audit.CreateAuditEntry(h.service.db, &actorID, "archive", "fine", &entityID, before, nil, c.ClientIP(), c.Request.UserAgent(), "Pending fine archived; row preserved")
+	response.Success(c, "Fine archived", nil)
 }
 
 func (h *FineHandler) GetStatistics(c *gin.Context) {

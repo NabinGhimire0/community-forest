@@ -3,6 +3,8 @@ package fiscalyears
 import (
 	"strconv"
 
+	"forest-management/internal/audit"
+	"forest-management/pkg/middleware"
 	"forest-management/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -40,6 +42,8 @@ func (h *FiscalYearHandler) Create(c *gin.Context) {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	actorID := middleware.GetUserID(c)
+	audit.CreateAuditEntry(h.service.db, &actorID, "create", "fiscal_year", &fy.ID, nil, fy, c.ClientIP(), c.Request.UserAgent(), "Fiscal year created")
 	response.Created(c, "Fiscal year created", fy)
 }
 
@@ -72,6 +76,7 @@ func (h *FiscalYearHandler) Update(c *gin.Context) {
 		response.BadRequest(c, "Invalid ID")
 		return
 	}
+	before, _ := h.service.GetByID(uint(id))
 	var input UpdateFiscalYearInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		response.BadRequest(c, "Invalid data")
@@ -82,6 +87,8 @@ func (h *FiscalYearHandler) Update(c *gin.Context) {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	actorID := middleware.GetUserID(c)
+	audit.CreateAuditEntry(h.service.db, &actorID, "update", "fiscal_year", &fy.ID, before, fy, c.ClientIP(), c.Request.UserAgent(), "Fiscal year metadata updated")
 	response.Success(c, "Fiscal year updated", fy)
 }
 
@@ -91,10 +98,14 @@ func (h *FiscalYearHandler) Delete(c *gin.Context) {
 		response.BadRequest(c, "Invalid ID")
 		return
 	}
+	before, _ := h.service.GetByID(uint(id))
 	if err := h.service.Delete(uint(id)); err != nil {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	actorID := middleware.GetUserID(c)
+	entityID := uint(id)
+	audit.CreateAuditEntry(h.service.db, &actorID, "delete_unused", "fiscal_year", &entityID, before, nil, c.ClientIP(), c.Request.UserAgent(), "Unused fiscal year deleted")
 	response.Success(c, "Fiscal year deleted", nil)
 }
 
@@ -104,11 +115,14 @@ func (h *FiscalYearHandler) SetActive(c *gin.Context) {
 		response.BadRequest(c, "Invalid ID")
 		return
 	}
+	before, _ := h.service.GetByID(uint(id))
 	fy, err := h.service.SetActive(uint(id))
 	if err != nil {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	actorID := middleware.GetUserID(c)
+	audit.CreateAuditEntry(h.service.db, &actorID, "activate", "fiscal_year", &fy.ID, before, fy, c.ClientIP(), c.Request.UserAgent(), "Fiscal year activated; stock/rates/fees rolled forward and annual fees assigned")
 	response.Success(c, "Active fiscal year set", fy)
 }
 
@@ -137,6 +151,8 @@ func (h *FiscalYearHandler) SetFee(c *gin.Context) {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	actorID := middleware.GetUserID(c)
+	audit.CreateAuditEntry(h.service.db, &actorID, "set_fee", "fee_setting", &fee.ID, nil, fee, c.ClientIP(), c.Request.UserAgent(), "Annual Gasti/Membership fee configured")
 	response.Created(c, "Membership fee set successfully", fee)
 }
 
@@ -187,6 +203,8 @@ func (h *FiscalYearHandler) UpdateFee(c *gin.Context) {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	actorID := middleware.GetUserID(c)
+	audit.CreateAuditEntry(h.service.db, &actorID, "update_fee", "fee_setting", &fee.ID, nil, fee, c.ClientIP(), c.Request.UserAgent(), "Annual Gasti/Membership fee updated; only unpaid system-generated charges synchronized")
 	response.Success(c, "Fee updated", fee)
 }
 
@@ -201,5 +219,8 @@ func (h *FiscalYearHandler) DeleteFee(c *gin.Context) {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	actorID := middleware.GetUserID(c)
+	entityID := uint(id)
+	audit.CreateAuditEntry(h.service.db, &actorID, "delete_unused_fee", "fee_setting", &entityID, nil, nil, c.ClientIP(), c.Request.UserAgent(), "Unused fee setting deleted")
 	response.Success(c, "Fee deleted", nil)
 }

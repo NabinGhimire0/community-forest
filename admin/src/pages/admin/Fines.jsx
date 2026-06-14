@@ -37,7 +37,11 @@ import {
 } from "../../components/ui/Table";
 import LoadingSpinner from "../../components/common/LoadingSpinner";
 import { useToast } from "../../components/common/Toast";
-import { formatCurrency, formatDate } from "../../utils/helpers";
+import { formatCurrency, formatDate, getImageUrl } from "../../utils/helpers";
+import {
+  buildFiscalYearOptions,
+  getActiveFiscalYearId,
+} from "../../utils/fiscalYears";
 
 const emptyFine = {
   fiscal_year_id: "",
@@ -87,11 +91,20 @@ export default function Fines() {
   const fetchMasterData = useCallback(async () => {
     try {
       const [membersRes, fiscalYearsRes] = await Promise.all([
-        api.getMembers({ limit: 100 }),
+        api.getMembers({ per_page: 100 }),
         api.getFiscalYears(),
       ]);
       if (membersRes.success) setMembers(membersRes.data || []);
-      if (fiscalYearsRes.success) setFiscalYears(fiscalYearsRes.data || []);
+      if (fiscalYearsRes.success) {
+        const years = fiscalYearsRes.data || [];
+        const activeId = getActiveFiscalYearId(years);
+        setFiscalYears(years);
+        setFiscalYearFilter((current) => current || activeId);
+        setForm((current) => ({
+          ...current,
+          fiscal_year_id: current.fiscal_year_id || activeId,
+        }));
+      }
     } catch (err) {
       console.error("Failed to fetch master data:", err);
     }
@@ -102,7 +115,7 @@ export default function Fines() {
     try {
       const res = await api.getFines({
         page,
-        limit: 10,
+        per_page: 10,
         search: search || undefined,
         status: statusFilter || undefined,
         fiscal_year_id: fiscalYearFilter || undefined,
@@ -111,7 +124,7 @@ export default function Fines() {
         setFines(res.data || []);
         setTotalPages(res.meta?.total_pages || 1);
       }
-    } catch (err) {
+    } catch (_err) {
       addToast("Failed to load fines", "error");
     } finally {
       setIsLoading(false);
@@ -137,6 +150,17 @@ export default function Fines() {
     fetchStats();
   }, [fetchFines, fetchStats]);
 
+  const newFineForm = () => ({
+    ...emptyFine,
+    fiscal_year_id: getActiveFiscalYearId(fiscalYears),
+    incident_date: new Date().toISOString().split("T")[0],
+  });
+
+  const openCreateFine = () => {
+    setForm(newFineForm());
+    setShowCreateModal(true);
+  };
+
   const handleCreate = async () => {
     setSaving(true);
     try {
@@ -156,7 +180,7 @@ export default function Fines() {
       if (res.success) {
         addToast("Fine created successfully", "success");
         setShowCreateModal(false);
-        setForm(emptyFine);
+        setForm(newFineForm());
         fetchFines();
         fetchStats();
       } else {
@@ -187,7 +211,7 @@ export default function Fines() {
         addToast("Fine updated successfully", "success");
         setShowEditModal(false);
         setEditingFine(null);
-        setForm(emptyFine);
+        setForm(newFineForm());
         fetchFines();
         fetchStats();
       } else {
@@ -348,10 +372,7 @@ export default function Fines() {
             <RefreshCw size={14} className="mr-1" /> Refresh
           </Button>
           {canEdit && (
-            <Button onClick={() => {
-              setForm({ ...emptyFine, incident_date: new Date().toISOString().split("T")[0] });
-              setShowCreateModal(true);
-            }}>
+            <Button onClick={openCreateFine}>
               <Plus size={16} /> Add Fine
             </Button>
           )}
@@ -438,10 +459,9 @@ export default function Fines() {
                   setFiscalYearFilter(e.target.value);
                   setPage(1);
                 }}
-                options={[
-                  { value: "", label: "All Fiscal Years" },
-                  ...fiscalYears.map(fy => ({ value: String(fy.id), label: fy.name })),
-                ]}
+                options={buildFiscalYearOptions(fiscalYears, {
+                  includeAll: true,
+                })}
                 className="w-40"
               />
             )}
@@ -459,7 +479,7 @@ export default function Fines() {
               <AlertTriangle size={48} className="mb-3 opacity-30" />
               <p className="text-lg font-medium">No fines found</p>
               {canEdit && (
-                <Button variant="outline" className="mt-4" onClick={() => setShowCreateModal(true)}>
+                <Button variant="outline" className="mt-4" onClick={openCreateFine}>
                   <Plus size={14} /> Add your first fine
                 </Button>
               )}
@@ -505,15 +525,17 @@ export default function Fines() {
                             <Eye size={15} />
                           </Button>
                           {canEdit && fine.status === "pending" && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => openEdit(fine)}
+                              title="Edit"
+                            >
+                              <Edit2 size={15} />
+                            </Button>
+                          )}
+                          {isAdmin && fine.status === "pending" && (
                             <>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => openEdit(fine)}
-                                title="Edit"
-                              >
-                                <Edit2 size={15} />
-                              </Button>
                               <Button
                                 variant="ghost"
                                 size="icon"
@@ -562,7 +584,7 @@ export default function Fines() {
         isOpen={showCreateModal}
         onClose={() => {
           setShowCreateModal(false);
-          setForm(emptyFine);
+          setForm(newFineForm());
         }}
         title="Add Fine"
         size="lg"
@@ -579,7 +601,7 @@ export default function Fines() {
               label="Fiscal Year"
               value={form.fiscal_year_id}
               onChange={(e) => setForm({ ...form, fiscal_year_id: e.target.value })}
-              options={fiscalYears.map(fy => ({ value: String(fy.id), label: fy.name }))}
+              options={buildFiscalYearOptions(fiscalYears)}
               placeholder="Select fiscal year"
               required
             />
@@ -664,7 +686,7 @@ export default function Fines() {
         onClose={() => {
           setShowEditModal(false);
           setEditingFine(null);
-          setForm(emptyFine);
+          setForm(newFineForm());
         }}
         title="Edit Fine"
         size="lg"
@@ -922,7 +944,7 @@ export default function Fines() {
                     </span>
                   </div>
                   <a
-                    href={viewingFine.photo}
+                    href={getImageUrl(viewingFine.photo)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-emerald-600 hover:text-emerald-700 text-sm flex items-center gap-1"

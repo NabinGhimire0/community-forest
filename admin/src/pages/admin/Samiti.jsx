@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useSelector } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import {
   Save,
   Plus,
@@ -18,6 +18,8 @@ import {
   Calendar,
   Globe,
   Eye,
+  KeyRound,
+  ShieldCheck,
   X,
 } from "lucide-react";
 import { api } from "../../services/api";
@@ -29,7 +31,8 @@ import Select from "../../components/ui/Select";
 import Modal from "../../components/ui/Modal";
 import LoadingSpinner from "../../components/common/LoadingSpinner";
 import { useToast } from "../../components/common/Toast";
-import { formatDate } from "../../utils/helpers";
+import { formatDate, getImageUrl } from "../../utils/helpers";
+import { setAppSettings } from "../../redux/slices/appSettingsSlice";
 
 const emptyHead = {
   name: "",
@@ -42,15 +45,20 @@ const emptyHead = {
   tenure_end: "",
   is_active: true,
   remarks: "",
+  create_login: false,
+  account_role: "staff",
+  account_password: "",
+  current_admin_password: "",
+  admin_mfa_code: "",
 };
 
 export default function Samiti() {
+  const dispatch = useDispatch();
   const { user } = useSelector((state) => state.auth);
   const { addToast } = useToast();
   const isAdmin = user?.role === "admin";
 
   const [activeTab, setActiveTab] = useState("info");
-  const [settings, setSettings] = useState(null);
   const [heads, setHeads] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -73,20 +81,20 @@ export default function Samiti() {
     try {
       const [settingsRes, headsRes] = await Promise.all([
         api.getSamitiSettings(),
-        api.getSamitiHeads(),
+        api.getManagedSamitiHeads(),
       ]);
       if (settingsRes.success && settingsRes.data) {
-        setSettings(settingsRes.data);
         setSettingsForm(settingsRes.data);
+        dispatch(setAppSettings(settingsRes.data));
       }
       if (headsRes.success) setHeads(headsRes.data || []);
-    } catch (err) {
+    } catch (_err) {
       addToast("Failed to load samiti data", "error");
     } finally {
       setIsLoading(false);
       setRefreshing(false);
     }
-  }, [addToast]);
+  }, [addToast, dispatch]);
 
   useEffect(() => {
     fetchData();
@@ -98,7 +106,8 @@ export default function Samiti() {
       const res = await api.updateSamitiSettings(settingsForm);
       if (res.success) {
         addToast("Settings saved successfully", "success");
-        setSettings(res.data);
+        setSettingsForm(res.data);
+        dispatch(setAppSettings(res.data));
       } else {
         addToast(res.message || "Failed to save", "error");
       }
@@ -110,6 +119,33 @@ export default function Samiti() {
   };
 
   const handleSaveHead = async () => {
+    if (!headForm.name.trim() || !headForm.post) {
+      addToast("Name and position are required", "error");
+      return;
+    }
+    if (!editingHead && headForm.create_login) {
+      if (!headForm.phone.trim()) {
+        addToast("Phone is required for a login account", "error");
+        return;
+      }
+      if (!["admin", "staff"].includes(headForm.account_role)) {
+        addToast("Choose Administrator or Staff as the account role", "error");
+        return;
+      }
+      if (headForm.account_password.length < 12) {
+        addToast("The initial password must contain at least 12 characters", "error");
+        return;
+      }
+      if (!headForm.current_admin_password) {
+        addToast("Enter your current administrator password to authorize this account change", "error");
+        return;
+      }
+      if (user?.mfa_enabled && !headForm.admin_mfa_code.trim()) {
+        addToast("Enter a fresh authenticator or backup code", "error");
+        return;
+      }
+    }
+
     setSaving(true);
     try {
       const payload = {
@@ -118,16 +154,43 @@ export default function Samiti() {
         tenure_start: headForm.tenure_start || null,
         tenure_end: headForm.tenure_end || null,
       };
-      
+      if (editingHead) {
+        delete payload.create_login;
+        delete payload.account_role;
+        delete payload.account_password;
+        delete payload.current_admin_password;
+        delete payload.admin_mfa_code;
+      }
+
       const res = editingHead
         ? await api.updateSamitiHead(editingHead.id, payload)
         : await api.createSamitiHead(payload);
-      
+
       if (res.success) {
-        addToast(`Committee member ${editingHead ? "updated" : "added"} successfully`, "success");
+        const createdLogin = !editingHead && headForm.create_login;
+        const deactivatedBootstrap = Boolean(
+          res.data?.bootstrap_admin_deactivated,
+        );
+        const promotedExisting = Boolean(
+          res.data?.existing_account_promoted,
+        );
+        addToast(
+          deactivatedBootstrap
+            ? "New administrator created. The bootstrap/default administrator is now inactive."
+            : promotedExisting
+              ? "Committee member added and the existing member login was promoted to the selected role."
+              : `Committee member ${editingHead ? "updated" : "added"}${createdLogin ? " with login credentials" : ""} successfully`,
+          "success",
+        );
         setShowHeadModal(false);
         setEditingHead(null);
         setHeadForm(emptyHead);
+        if (deactivatedBootstrap && user?.is_bootstrap_admin) {
+          window.setTimeout(() => {
+            window.location.assign("/login");
+          }, 1400);
+          return;
+        }
         fetchData();
       } else {
         addToast(res.message || "Failed to save", "error");
@@ -167,8 +230,12 @@ export default function Samiti() {
       const res = await api.uploadSamitiLogo(formData);
       if (res.success) {
         addToast("Logo uploaded successfully", "success");
-        setSettingsForm({ ...settingsForm, logo: res.data.logo_url });
-        setSettings({ ...settings, logo: res.data.logo_url });
+        const updatedSettings = {
+          ...settingsForm,
+          logo: res.data.logo_url,
+        };
+        setSettingsForm(updatedSettings);
+        dispatch(setAppSettings(updatedSettings));
       } else {
         addToast(res.message || "Upload failed", "error");
       }
@@ -191,7 +258,7 @@ export default function Samiti() {
         addToast("Photo uploaded successfully", "success");
         fetchData();
         if (viewingHead && viewingHead.id === headId) {
-          const updated = await api.getSamitiHead(headId);
+          const updated = await api.getManagedSamitiHead(headId);
           if (updated.success) setViewingHead(updated.data);
         }
       } else {
@@ -223,6 +290,11 @@ export default function Samiti() {
       tenure_end: head.tenure_end?.split("T")[0] || "",
       is_active: head.is_active,
       remarks: head.remarks || "",
+      create_login: false,
+      account_role: head.user?.role || "staff",
+      account_password: "",
+      current_admin_password: "",
+      admin_mfa_code: "",
     });
     setShowHeadModal(true);
   };
@@ -326,7 +398,7 @@ export default function Samiti() {
               <div className="relative">
                 {settingsForm.logo ? (
                   <img
-                    src={settingsForm.logo}
+                    src={getImageUrl(settingsForm.logo)}
                     alt="Samiti Logo"
                     className="w-24 h-24 object-cover rounded-lg border border-gray-200 dark:border-white/10"
                     onError={(e) => {
@@ -500,7 +572,7 @@ export default function Samiti() {
                         <div className="relative">
                           {head.photo ? (
                             <img
-                              src={head.photo}
+                              src={getImageUrl(head.photo)}
                               alt={head.name}
                               className="w-14 h-14 rounded-full object-cover border-2 border-emerald-500"
                               onError={(e) => {
@@ -569,6 +641,12 @@ export default function Samiti() {
                         <div className="flex items-center gap-2">
                           <MapPin size={12} />
                           <span className="truncate">{head.address}</span>
+                        </div>
+                      )}
+                      {head.user && (
+                        <div className="flex items-center gap-2 pt-1 text-xs font-semibold text-blue-700 dark:text-blue-300">
+                          <KeyRound size={12} />
+                          Login: {head.user.role === "admin" ? "Administrator" : "Staff"} ({head.user.status})
                         </div>
                       )}
                       <div className="flex items-center gap-2 pt-1">
@@ -666,6 +744,105 @@ export default function Samiti() {
             onChange={(e) => setHeadForm({ ...headForm, remarks: e.target.value })}
             rows={2}
           />
+          {!editingHead && (
+            <div className="rounded-2xl border border-blue-200 bg-blue-50/70 p-4 dark:border-blue-900/50 dark:bg-blue-950/20">
+              <label className="flex cursor-pointer items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={headForm.create_login}
+                  onChange={(e) =>
+                    setHeadForm({
+                      ...headForm,
+                      create_login: e.target.checked,
+                    })
+                  }
+                  className="mt-1 h-4 w-4 rounded border-gray-300"
+                />
+                <span>
+                  <span className="flex items-center gap-2 font-bold text-blue-900 dark:text-blue-100">
+                    <KeyRound size={17} /> Create a system login for this committee member
+                  </span>
+                  <span className="mt-1 block text-xs leading-5 text-blue-700 dark:text-blue-300">
+                    Use this only when the person must sign in as an administrator or staff member. If this phone already belongs to a registered member, that existing login will be promoted and its password will be replaced.
+                  </span>
+                </span>
+              </label>
+
+              {headForm.create_login && (
+                <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <Select
+                    label="System Role"
+                    value={headForm.account_role}
+                    onChange={(e) =>
+                      setHeadForm({ ...headForm, account_role: e.target.value })
+                    }
+                    options={[
+                      { value: "staff", label: "Staff" },
+                      { value: "admin", label: "Administrator" },
+                    ]}
+                    required
+                  />
+                  <Input
+                    label="Initial Password"
+                    type="password"
+                    value={headForm.account_password}
+                    onChange={(e) =>
+                      setHeadForm({
+                        ...headForm,
+                        account_password: e.target.value,
+                      })
+                    }
+                    minLength={12}
+                    placeholder="12+ chars with upper, lower, number and symbol"
+                    required
+                  />
+                  <Input
+                    label="Your Current Admin Password"
+                    type="password"
+                    value={headForm.current_admin_password}
+                    onChange={(e) =>
+                      setHeadForm({
+                        ...headForm,
+                        current_admin_password: e.target.value,
+                      })
+                    }
+                    autoComplete="current-password"
+                    required
+                  />
+                  <Input
+                    label={user?.mfa_enabled ? "Fresh MFA / Backup Code" : "MFA Code"}
+                    type="text"
+                    inputMode="numeric"
+                    value={headForm.admin_mfa_code}
+                    onChange={(e) =>
+                      setHeadForm({
+                        ...headForm,
+                        admin_mfa_code: e.target.value,
+                      })
+                    }
+                    placeholder={user?.mfa_enabled ? "Required fresh code" : "Required in production"}
+                    required={Boolean(user?.mfa_enabled)}
+                  />
+                  <div className="md:col-span-2 text-xs leading-5 text-blue-700 dark:text-blue-300">
+                    Creating or promoting a privileged login is a step-up protected action. Your password and fresh MFA code are verified by the server and are never stored in the form after submission.
+                  </div>
+                  {headForm.account_role === "admin" && (
+                    <div className="md:col-span-2 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+                      <ShieldCheck size={17} className="mt-0.5 shrink-0" />
+                      Creating the first real administrator deactivates the environment-seeded default administrator. Keep these new credentials safely before saving.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {editingHead?.user && (
+            <div className="rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/30 dark:text-blue-200">
+              Linked login: <strong>{editingHead.user.role === "admin" ? "Administrator" : "Staff"}</strong> · {editingHead.user.phone} · {editingHead.user.status}
+            </div>
+          )}
+
           <div className="flex items-center gap-2">
             <input
               type="checkbox"
@@ -698,7 +875,7 @@ export default function Samiti() {
               <div className="relative mb-3">
                 {viewingHead.photo ? (
                   <img
-                    src={viewingHead.photo}
+                    src={getImageUrl(viewingHead.photo)}
                     alt={viewingHead.name}
                     className="w-32 h-32 rounded-full object-cover border-4 border-emerald-500"
                     onError={(e) => {
@@ -792,6 +969,19 @@ export default function Samiti() {
                 </div>
               </div>
             </div>
+
+            {viewingHead.user && (
+              <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 dark:border-blue-900/50 dark:bg-blue-950/30">
+                <div className="flex items-center gap-2 font-bold text-blue-900 dark:text-blue-100">
+                  <KeyRound size={18} /> System Login
+                </div>
+                <div className="mt-2 grid grid-cols-1 gap-2 text-sm sm:grid-cols-3">
+                  <div><span className="text-xs text-blue-500">Role</span><p className="font-semibold capitalize">{viewingHead.user.role}</p></div>
+                  <div><span className="text-xs text-blue-500">Phone</span><p className="font-semibold">{viewingHead.user.phone}</p></div>
+                  <div><span className="text-xs text-blue-500">Status</span><p className="font-semibold capitalize">{viewingHead.user.status}</p></div>
+                </div>
+              </div>
+            )}
 
             {/* Remarks */}
             {viewingHead.remarks && (

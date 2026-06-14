@@ -3,6 +3,8 @@ package resources
 import (
 	"strconv"
 
+	"forest-management/internal/audit"
+	"forest-management/pkg/middleware"
 	"forest-management/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -39,6 +41,7 @@ func (h *ResourceHandler) CreateType(c *gin.Context) {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	h.audit(c, "create", "resource_type", resourceType.ID, nil, resourceType, "Resource type created")
 	response.Created(c, "Resource type created", resourceType)
 }
 
@@ -81,6 +84,7 @@ func (h *ResourceHandler) UpdateType(c *gin.Context) {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	h.audit(c, "update", "resource_type", resourceType.ID, nil, resourceType, "Resource type updated")
 	response.Success(c, "Resource type updated", resourceType)
 }
 
@@ -94,6 +98,7 @@ func (h *ResourceHandler) DeleteType(c *gin.Context) {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	h.audit(c, "delete_unused", "resource_type", uint(id), nil, nil, "Unused resource type deleted")
 	response.Success(c, "Resource type deleted", nil)
 }
 
@@ -120,6 +125,7 @@ func (h *ResourceHandler) CreateItem(c *gin.Context) {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	h.audit(c, "create", "resource_item", item.ID, nil, item, "Resource item created")
 	response.Created(c, "Resource item created", item)
 }
 
@@ -163,6 +169,7 @@ func (h *ResourceHandler) UpdateItem(c *gin.Context) {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	h.audit(c, "update", "resource_item", item.ID, nil, item, "Resource item updated")
 	response.Success(c, "Resource item updated", item)
 }
 
@@ -176,6 +183,7 @@ func (h *ResourceHandler) DeleteItem(c *gin.Context) {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	h.audit(c, "delete_unused", "resource_item", uint(id), nil, nil, "Unused resource item deleted")
 	response.Success(c, "Resource item deleted", nil)
 }
 
@@ -202,6 +210,7 @@ func (h *ResourceHandler) SetRate(c *gin.Context) {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	h.audit(c, "set", "resource_rate", rate.ID, nil, rate, "Resource rate created or replaced")
 	response.Created(c, "Rate set successfully", rate)
 }
 
@@ -245,6 +254,7 @@ func (h *ResourceHandler) UpdateRate(c *gin.Context) {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	h.audit(c, "update", "resource_rate", rate.ID, nil, rate, "Resource rate updated")
 	response.Success(c, "Rate updated", rate)
 }
 
@@ -258,6 +268,7 @@ func (h *ResourceHandler) DeleteRate(c *gin.Context) {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	h.audit(c, "delete_unused", "resource_rate", uint(id), nil, nil, "Unused resource rate deleted")
 	response.Success(c, "Rate deleted", nil)
 }
 
@@ -284,6 +295,7 @@ func (h *ResourceHandler) UpdateStock(c *gin.Context) {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	h.audit(c, "set", "stock", stock.ID, nil, stock, "Stock balance created or updated")
 	response.Success(c, "Stock updated", stock)
 }
 
@@ -327,6 +339,7 @@ func (h *ResourceHandler) UpdateStockQuantity(c *gin.Context) {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	h.audit(c, "update", "stock", stock.ID, nil, stock, "Stock quantity updated")
 	response.Success(c, "Stock quantity updated", stock)
 }
 
@@ -340,5 +353,11 @@ func (h *ResourceHandler) DeleteStock(c *gin.Context) {
 		response.Error(c, 500, err.Error())
 		return
 	}
+	h.audit(c, "delete_unused", "stock", uint(id), nil, nil, "Unused stock row deleted")
 	response.Success(c, "Stock deleted", nil)
+}
+
+func (h *ResourceHandler) audit(c *gin.Context, action, entity string, entityID uint, oldValues, newValues interface{}, remarks string) {
+	actorID := middleware.GetUserID(c)
+	audit.CreateAuditEntry(h.service.db, &actorID, action, entity, &entityID, oldValues, newValues, c.ClientIP(), c.Request.UserAgent(), remarks)
 }

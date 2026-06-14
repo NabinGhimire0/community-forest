@@ -3,6 +3,7 @@ package reports
 import (
 	"forest-management/internal/models"
 	"sort"
+	"strconv"
 	"time"
 
 	"gorm.io/gorm"
@@ -19,7 +20,9 @@ func NewReportService(db *gorm.DB) *ReportService {
 // GetDashboard returns summary metrics for the admin dashboard
 func (s *ReportService) GetDashboard() (map[string]interface{}, error) {
 	var totalMembers, activeMembers, pendingRequests, totalRequests int64
+	var membersWithHistoricalDue, unverifiedHistoricalEntries int64
 	var totalRevenue, totalExpenses, totalFinesCollected, balance float64
+	var historicalOutstanding float64
 
 	// Member counts
 	s.db.Model(&models.Member{}).Count(&totalMembers)
@@ -29,12 +32,23 @@ func (s *ReportService) GetDashboard() (map[string]interface{}, error) {
 	s.db.Model(&models.Request{}).Count(&totalRequests)
 	s.db.Model(&models.Request{}).Where("status = ?", "pending").Count(&pendingRequests)
 
+	// Historical register balances across all fiscal years.
+	s.db.Model(&models.Transaction{}).
+		Where("type LIKE ? AND record_status = ? AND amount_remaining > 0", "legacy_%", "verified").
+		Select("COALESCE(SUM(amount_remaining), 0)").Scan(&historicalOutstanding)
+	s.db.Model(&models.Transaction{}).
+		Where("type LIKE ? AND record_status = ? AND amount_remaining > 0", "legacy_%", "verified").
+		Distinct("member_id").Count(&membersWithHistoricalDue)
+	s.db.Model(&models.Transaction{}).
+		Where("type LIKE ? AND record_status = ?", "legacy_%", "draft").
+		Count(&unverifiedHistoricalEntries)
+
 	// Financial totals (current active fiscal year)
 	var activeFY models.FiscalYear
 	if s.db.Where("is_active = ?", true).First(&activeFY).Error == nil {
-		// Revenue from transactions
+		// Collected revenue from verified ledger transactions, including legacy balances.
 		s.db.Model(&models.Transaction{}).
-			Where("fiscal_year_id = ?", activeFY.ID).
+			Where("fiscal_year_id = ? AND (record_status = ? OR record_status = '')", activeFY.ID, "verified").
 			Select("COALESCE(SUM(amount_paid), 0)").Scan(&totalRevenue)
 
 		// Expenses
@@ -42,12 +56,12 @@ func (s *ReportService) GetDashboard() (map[string]interface{}, error) {
 			Where("fiscal_year_id = ?", activeFY.ID).
 			Select("COALESCE(SUM(amount), 0)").Scan(&totalExpenses)
 
-		// Fines collected
-		s.db.Model(&models.Fine{}).
-			Where("fiscal_year_id = ? AND status = ?", activeFY.ID, "paid").
-			Select("COALESCE(SUM(fine_amount), 0)").Scan(&totalFinesCollected)
+		// Fine collections are already represented in the transaction ledger.
+		s.db.Model(&models.Transaction{}).
+			Where("fiscal_year_id = ? AND type = ? AND (record_status = ? OR record_status = '')", activeFY.ID, "fine", "verified").
+			Select("COALESCE(SUM(amount_paid), 0)").Scan(&totalFinesCollected)
 
-		balance = totalRevenue + totalFinesCollected - totalExpenses
+		balance = totalRevenue - totalExpenses
 	}
 
 	// Get recent requests
@@ -71,17 +85,20 @@ func (s *ReportService) GetDashboard() (map[string]interface{}, error) {
 		Scan(&recentPayments)
 
 	return map[string]interface{}{
-		"total_members":      totalMembers,
-		"active_members":     activeMembers,
-		"total_requests":     totalRequests,
-		"pending_requests":   pendingRequests,
-		"total_revenue":      totalRevenue,
-		"total_expenses":     totalExpenses,
-		"total_fines":        totalFinesCollected,
-		"balance":            balance,
-		"recent_requests":    recentRequests,
-		"recent_payments":    recentPayments,
-		"active_fiscal_year": activeFY.Name,
+		"total_members":                 totalMembers,
+		"active_members":                activeMembers,
+		"total_requests":                totalRequests,
+		"pending_requests":              pendingRequests,
+		"total_revenue":                 totalRevenue,
+		"total_expenses":                totalExpenses,
+		"total_fines":                   totalFinesCollected,
+		"balance":                       balance,
+		"historical_outstanding":        historicalOutstanding,
+		"members_with_historical_due":   membersWithHistoricalDue,
+		"unverified_historical_entries": unverifiedHistoricalEntries,
+		"recent_requests":               recentRequests,
+		"recent_payments":               recentPayments,
+		"active_fiscal_year":            activeFY.Name,
 	}, nil
 }
 
@@ -134,12 +151,14 @@ func (s *ReportService) GetResourceReport(fiscalYearID string) (map[string]inter
 		Unit              string  `json:"unit"`
 		TotalQuantity     float64 `json:"total_quantity"`
 		RemainingQuantity float64 `json:"remaining_quantity"`
+		ReservedQuantity  float64 `json:"reserved_quantity"`
+		AvailableQuantity float64 `json:"available_quantity"`
 		UsedQuantity      float64 `json:"used_quantity"`
 		UsedPercent       float64 `json:"used_percent"`
 	}
 
 	query := s.db.Model(&models.Stock{}).
-		Select("stocks.resource_item_id, resource_items.name as item_name, resource_types.name as type_name, resource_types.unit as unit, stocks.total_quantity, stocks.remaining_quantity, (stocks.total_quantity - stocks.remaining_quantity) as used_quantity, CASE WHEN stocks.total_quantity > 0 THEN ROUND(((stocks.total_quantity - stocks.remaining_quantity) / stocks.total_quantity) * 100, 2) ELSE 0 END as used_percent").
+		Select("stocks.resource_item_id, resource_items.name as item_name, resource_types.name as type_name, resource_types.unit as unit, stocks.total_quantity, stocks.remaining_quantity, stocks.reserved_quantity, (stocks.remaining_quantity - stocks.reserved_quantity) as available_quantity, (stocks.total_quantity - stocks.remaining_quantity) as used_quantity, CASE WHEN stocks.total_quantity > 0 THEN ROUND(((stocks.total_quantity - stocks.remaining_quantity) / stocks.total_quantity) * 100, 2) ELSE 0 END as used_percent").
 		Joins("JOIN resource_items ON resource_items.id = stocks.resource_item_id").
 		Joins("JOIN resource_types ON resource_types.id = resource_items.resource_type_id")
 
@@ -160,7 +179,7 @@ func (s *ReportService) GetResourceReport(fiscalYearID string) (map[string]inter
 		Select("resource_types.name as type_name, COALESCE(SUM(transactions.total_amount), 0) as total_amount, COALESCE(SUM(transactions.quantity), 0) as total_quantity").
 		Joins("JOIN resource_items ON resource_items.id = transactions.resource_item_id").
 		Joins("JOIN resource_types ON resource_types.id = resource_items.resource_type_id").
-		Where("transactions.type = ?", "resource_sale")
+		Where("transactions.type = ? AND (transactions.record_status = ? OR transactions.record_status = '')", "resource_sale", "verified")
 
 	if fiscalYearID != "" {
 		salesQuery = salesQuery.Where("transactions.fiscal_year_id = ?", fiscalYearID)
@@ -177,22 +196,30 @@ func (s *ReportService) GetResourceReport(fiscalYearID string) (map[string]inter
 // GetFinancialReport returns comprehensive financial data
 func (s *ReportService) GetFinancialReport(fiscalYearID string) (map[string]interface{}, error) {
 	var totalSales, totalMembershipFee, totalCollected float64
-	var totalExpenses, totalFinesCollected float64
+	var totalExpenses, totalFinesCollected, historicalOutstanding, historicalCollected float64
 
 	// Revenue from resource sales
 	s.db.Model(&models.Transaction{}).
-		Where("fiscal_year_id = ? AND type = ?", fiscalYearID, "resource_sale").
+		Where("fiscal_year_id = ? AND type IN ? AND (record_status = ? OR record_status = '')", fiscalYearID, []string{"resource_sale", "legacy_timber_sale", "legacy_firewood_sale", "legacy_other_sale"}, "verified").
 		Select("COALESCE(SUM(total_amount), 0)").Scan(&totalSales)
 
 	// Revenue from membership fees
 	s.db.Model(&models.Transaction{}).
-		Where("fiscal_year_id = ? AND type = ?", fiscalYearID, "membership_fee").
+		Where("fiscal_year_id = ? AND type IN ? AND (record_status = ? OR record_status = '')", fiscalYearID, []string{"membership_fee", "legacy_gasti_fee"}, "verified").
 		Select("COALESCE(SUM(total_amount), 0)").Scan(&totalMembershipFee)
 
 	// Total collected
 	s.db.Model(&models.Transaction{}).
-		Where("fiscal_year_id = ?", fiscalYearID).
+		Where("fiscal_year_id = ? AND (record_status = ? OR record_status = '')", fiscalYearID, "verified").
 		Select("COALESCE(SUM(amount_paid), 0)").Scan(&totalCollected)
+
+	// Historical balance recovery and outstanding amount.
+	s.db.Model(&models.Transaction{}).
+		Where("fiscal_year_id = ? AND type LIKE 'legacy_%%' AND (record_status = ? OR record_status = '')", fiscalYearID, "verified").
+		Select("COALESCE(SUM(amount_paid), 0)").Scan(&historicalCollected)
+	s.db.Model(&models.Transaction{}).
+		Where("fiscal_year_id = ? AND type LIKE 'legacy_%%' AND (record_status = ? OR record_status = '')", fiscalYearID, "verified").
+		Select("COALESCE(SUM(amount_remaining), 0)").Scan(&historicalOutstanding)
 
 	// Total expenses
 	s.db.Model(&models.Expense{}).
@@ -214,7 +241,7 @@ func (s *ReportService) GetFinancialReport(fiscalYearID string) (map[string]inte
 	// Monthly income
 	s.db.Model(&models.Transaction{}).
 		Select("TO_CHAR(date, 'YYYY-MM') as month, COALESCE(SUM(amount_paid), 0) as income").
-		Where("fiscal_year_id = ?", fiscalYearID).
+		Where("fiscal_year_id = ? AND (record_status = ? OR record_status = '')", fiscalYearID, "verified").
 		Group("TO_CHAR(date, 'YYYY-MM')").
 		Order("month ASC").
 		Scan(&monthlyData)
@@ -277,23 +304,29 @@ func (s *ReportService) GetFinancialReport(fiscalYearID string) (map[string]inte
 		Total  float64 `json:"total"`
 		Count  int64   `json:"count"`
 	}
-	s.db.Model(&models.Payment{}).
-		Select("payment_method, COALESCE(SUM(amount), 0) as total, COUNT(*) as count").
-		Where("status = ?", "paid").
-		Group("payment_method").
-		Scan(&paymentMethods)
+	paymentQuery := s.db.Model(&models.Payment{}).
+		Select("payments.payment_method, COALESCE(SUM(payments.amount), 0) as total, COUNT(*) as count").
+		Joins("LEFT JOIN requests ON requests.id = payments.request_id").
+		Joins("LEFT JOIN transactions ledger_targets ON ledger_targets.id = payments.ledger_transaction_id").
+		Where("payments.status = ?", "paid")
+	if fiscalYearID != "" {
+		paymentQuery = paymentQuery.Where("COALESCE(requests.fiscal_year_id, ledger_targets.fiscal_year_id) = ?", fiscalYearID)
+	}
+	paymentQuery.Group("payments.payment_method").Scan(&paymentMethods)
 
 	return map[string]interface{}{
-		"total_revenue":     totalSales + totalMembershipFee,
-		"resource_sales":    totalSales,
-		"membership_fees":   totalMembershipFee,
-		"total_collected":   totalCollected,
-		"total_expenses":    totalExpenses,
-		"total_fines":       totalFinesCollected,
-		"net_balance":       (totalSales + totalMembershipFee + totalFinesCollected) - totalExpenses,
-		"monthly_data":      mergedMonthly,
-		"category_expenses": categoryExpenses,
-		"payment_methods":   paymentMethods,
+		"total_revenue":          totalSales + totalMembershipFee,
+		"resource_sales":         totalSales,
+		"membership_fees":        totalMembershipFee,
+		"total_collected":        totalCollected,
+		"historical_collected":   historicalCollected,
+		"historical_outstanding": historicalOutstanding,
+		"total_expenses":         totalExpenses,
+		"total_fines":            totalFinesCollected,
+		"net_balance":            totalCollected - totalExpenses,
+		"monthly_data":           mergedMonthly,
+		"category_expenses":      categoryExpenses,
+		"payment_methods":        paymentMethods,
 	}, nil
 }
 
@@ -314,13 +347,63 @@ func (s *ReportService) GetDashboardCharts() (map[string]interface{}, error) {
 		Expense float64 `json:"expense"`
 	}
 
+	var monthlyIncome []struct {
+		Month  string  `json:"month"`
+		Income float64 `json:"income"`
+	}
 	s.db.Model(&models.Transaction{}).
-		Select("TO_CHAR(date, 'Mon YYYY') as month, COALESCE(SUM(amount_paid), 0) as income").
-		Where("date >= NOW() - INTERVAL '12 months'").
-		Group("TO_CHAR(date, 'Mon YYYY'), EXTRACT(MONTH FROM date)").
-		Order("MIN(date) ASC").
-		Limit(12).
-		Scan(&monthlyFinancials)
+		Select("TO_CHAR(date, 'YYYY-MM') as month, COALESCE(SUM(amount_paid), 0) as income").
+		Where("fiscal_year_id = ? AND (record_status = ? OR record_status = '')", activeFY.ID, "verified").
+		Group("TO_CHAR(date, 'YYYY-MM')").
+		Order("month ASC").
+		Scan(&monthlyIncome)
+
+	var monthlyExpenses []struct {
+		Month   string  `json:"month"`
+		Expense float64 `json:"expense"`
+	}
+	s.db.Model(&models.Expense{}).
+		Select("TO_CHAR(expense_date, 'YYYY-MM') as month, COALESCE(SUM(amount), 0) as expense").
+		Where("fiscal_year_id = ?", activeFY.ID).
+		Group("TO_CHAR(expense_date, 'YYYY-MM')").
+		Order("month ASC").
+		Scan(&monthlyExpenses)
+
+	monthlyMap := make(map[string]*struct {
+		Month   string
+		Income  float64
+		Expense float64
+	})
+	for _, item := range monthlyIncome {
+		monthlyMap[item.Month] = &struct {
+			Month   string
+			Income  float64
+			Expense float64
+		}{Month: item.Month, Income: item.Income}
+	}
+	for _, item := range monthlyExpenses {
+		if monthlyMap[item.Month] == nil {
+			monthlyMap[item.Month] = &struct {
+				Month   string
+				Income  float64
+				Expense float64
+			}{Month: item.Month}
+		}
+		monthlyMap[item.Month].Expense = item.Expense
+	}
+	months := make([]string, 0, len(monthlyMap))
+	for month := range monthlyMap {
+		months = append(months, month)
+	}
+	sort.Strings(months)
+	for _, month := range months {
+		item := monthlyMap[month]
+		monthlyFinancials = append(monthlyFinancials, struct {
+			Month   string  `json:"month"`
+			Income  float64 `json:"income"`
+			Expense float64 `json:"expense"`
+		}{Month: item.Month, Income: item.Income, Expense: item.Expense})
+	}
 
 	charts["monthly_financials"] = monthlyFinancials
 
@@ -345,7 +428,7 @@ func (s *ReportService) GetDashboardCharts() (map[string]interface{}, error) {
 		Select("resource_types.name as type_name, COALESCE(SUM(transactions.total_amount), 0) as total_amount, COALESCE(SUM(transactions.quantity), 0) as total_quantity").
 		Joins("JOIN resource_items ON resource_items.id = transactions.resource_item_id").
 		Joins("JOIN resource_types ON resource_types.id = resource_items.resource_type_id").
-		Where("transactions.type = ?", "resource_sale").
+		Where("transactions.fiscal_year_id = ? AND transactions.type = ? AND (transactions.record_status = ? OR transactions.record_status = '')", activeFY.ID, "resource_sale", "verified").
 		Group("resource_types.name").
 		Order("total_amount DESC").
 		Limit(6).
@@ -387,9 +470,11 @@ func (s *ReportService) GetDashboardCharts() (map[string]interface{}, error) {
 		Total  float64 `json:"total"`
 	}
 	s.db.Model(&models.Payment{}).
-		Select("payment_method, COUNT(*) as count, COALESCE(SUM(amount), 0) as total").
-		Where("status = ?", "paid").
-		Group("payment_method").
+		Select("payments.payment_method, COUNT(*) as count, COALESCE(SUM(payments.amount), 0) as total").
+		Joins("LEFT JOIN requests ON requests.id = payments.request_id").
+		Joins("LEFT JOIN transactions ledger_targets ON ledger_targets.id = payments.ledger_transaction_id").
+		Where("payments.status = ? AND COALESCE(requests.fiscal_year_id, ledger_targets.fiscal_year_id) = ?", "paid", activeFY.ID).
+		Group("payments.payment_method").
 		Scan(&paymentMethodData)
 	charts["payment_method_distribution"] = paymentMethodData
 
@@ -415,6 +500,7 @@ func (s *ReportService) GetDashboardCharts() (map[string]interface{}, error) {
 	}
 	s.db.Model(&models.Fine{}).
 		Select("status, COUNT(*) as count, COALESCE(SUM(fine_amount), 0) as total").
+		Where("fiscal_year_id = ?", activeFY.ID).
 		Group("status").
 		Scan(&fineStatusData)
 	charts["fine_status"] = fineStatusData
@@ -429,7 +515,7 @@ func (s *ReportService) GetDashboardCharts() (map[string]interface{}, error) {
 		UsedPercent float64 `json:"used_percent"`
 	}
 	s.db.Model(&models.Stock{}).
-		Select("resource_items.name as item_name, resource_types.name as type_name, stocks.total_quantity, stocks.remaining_quantity, (stocks.total_quantity - stocks.remaining_quantity) as used_quantity, CASE WHEN stocks.total_quantity > 0 THEN ROUND(((stocks.total_quantity - stocks.remaining_quantity) / stocks.total_quantity) * 100, 2) ELSE 0 END as used_percent").
+		Select("resource_items.name as item_name, resource_types.name as type_name, stocks.total_quantity, stocks.remaining_quantity, stocks.reserved_quantity, (stocks.remaining_quantity - stocks.reserved_quantity) as available_quantity, (stocks.total_quantity - stocks.remaining_quantity) as used_quantity, CASE WHEN stocks.total_quantity > 0 THEN ROUND(((stocks.total_quantity - stocks.remaining_quantity) / stocks.total_quantity) * 100, 2) ELSE 0 END as used_percent").
 		Joins("JOIN resource_items ON resource_items.id = stocks.resource_item_id").
 		Joins("JOIN resource_types ON resource_types.id = resource_items.resource_type_id").
 		Where("stocks.fiscal_year_id = ?", activeFY.ID).
@@ -529,5 +615,5 @@ func formatNumber(num float64) string {
 }
 
 func formatFloat(num float64) string {
-	return string(rune(int(num*10)/10)) + "." + string(rune(int(num*10)%10))
+	return strconv.FormatFloat(num, 'f', 1, 64)
 }

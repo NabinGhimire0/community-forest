@@ -30,12 +30,16 @@ import {
 import LoadingSpinner from "../../components/common/LoadingSpinner";
 import { useToast } from "../../components/common/Toast";
 import { formatCurrency } from "../../utils/helpers";
+import {
+  buildFiscalYearOptions,
+  getActiveFiscalYearId,
+} from "../../utils/fiscalYears";
 
 export default function Resources() {
   const { user } = useSelector((state) => state.auth);
   const { addToast } = useToast();
-  const canEdit = user?.role === "admin" || user?.role === "staff";
   const isAdmin = user?.role === "admin";
+  const canEdit = isAdmin;
 
   const [activeTab, setActiveTab] = useState("types");
   const [types, setTypes] = useState([]);
@@ -101,7 +105,7 @@ export default function Resources() {
         const res = await api.getStock();
         if (res.success) setStock(res.data || []);
       }
-    } catch (err) {
+    } catch (_err) {
       addToast(`Failed to load ${activeTab}`, "error");
     } finally {
       setIsLoading(false);
@@ -227,14 +231,23 @@ export default function Resources() {
 
   const openCreate = () => {
     setEditingItem(null);
+    const activeFiscalYearId = getActiveFiscalYearId(fiscalYears);
     if (activeTab === "types") {
       setForm({ name: "", unit: "" });
     } else if (activeTab === "items") {
       setForm({ name: "", resource_type_id: "" });
     } else if (activeTab === "rates") {
-      setForm({ resource_item_id: "", fiscal_year_id: "", rate_per_unit: "" });
+      setForm({
+        resource_item_id: "",
+        fiscal_year_id: activeFiscalYearId,
+        rate_per_unit: "",
+      });
     } else if (activeTab === "stock") {
-      setForm({ resource_item_id: "", fiscal_year_id: "", total_quantity: "" });
+      setForm({
+        resource_item_id: "",
+        fiscal_year_id: activeFiscalYearId,
+        total_quantity: "",
+      });
     }
     setShowModal(true);
   };
@@ -262,19 +275,6 @@ export default function Resources() {
       });
     }
     setShowModal(true);
-  };
-
-  // Helper to get items grouped by type for better display
-  const getItemsGroupedByType = () => {
-    const grouped = {};
-    items.forEach((item) => {
-      const typeName = item.type?.name || "Uncategorized";
-      if (!grouped[typeName]) {
-        grouped[typeName] = [];
-      }
-      grouped[typeName].push(item);
-    });
-    return grouped;
   };
 
   return (
@@ -532,8 +532,10 @@ export default function Resources() {
                       <TableHead>Resource Item</TableHead>
                       <TableHead>Fiscal Year</TableHead>
                       <TableHead>Total Quantity</TableHead>
+                      <TableHead>Reserved</TableHead>
+                      <TableHead>Available</TableHead>
                       <TableHead>Remaining</TableHead>
-                      <TableHead>Usage %</TableHead>
+                      <TableHead>Sold / Used</TableHead>
                       {canEdit && <TableHead>Actions</TableHead>}
                     </TableRow>
                   </TableHeader>
@@ -541,7 +543,7 @@ export default function Resources() {
                     {stock.length === 0 ? (
                       <TableRow>
                         <TableCell
-                          colSpan={canEdit ? 7 : 6}
+                          colSpan={canEdit ? 9 : 8}
                           className="text-center py-8 text-gray-500"
                         >
                           No stock entries found. Click "Add Stock" to record
@@ -550,6 +552,11 @@ export default function Resources() {
                       </TableRow>
                     ) : (
                       stock.map((s) => {
+                        const reservedQuantity = Number(s.reserved_quantity || 0);
+                        const availableQuantity = Math.max(
+                          0,
+                          Number(s.remaining_quantity || 0) - reservedQuantity,
+                        );
                         const usagePercent =
                           s.total_quantity > 0
                             ? (
@@ -569,6 +576,12 @@ export default function Resources() {
                             <TableCell>{s.fiscal_year?.name || "-"}</TableCell>
                             <TableCell>
                               {s.total_quantity} {s.item?.type?.unit || ""}
+                            </TableCell>
+                            <TableCell className="font-semibold text-amber-700 dark:text-amber-300">
+                              {reservedQuantity} {s.item?.type?.unit || ""}
+                            </TableCell>
+                            <TableCell className="font-semibold text-emerald-700 dark:text-emerald-300">
+                              {availableQuantity} {s.item?.type?.unit || ""}
                             </TableCell>
                             <TableCell className="font-semibold">
                               {s.remaining_quantity} {s.item?.type?.unit || ""}
@@ -711,10 +724,7 @@ export default function Resources() {
                 onChange={(e) =>
                   setForm({ ...form, fiscal_year_id: e.target.value })
                 }
-                options={fiscalYears.map((fy) => ({
-                  value: String(fy.id),
-                  label: fy.name,
-                }))}
+                options={buildFiscalYearOptions(fiscalYears)}
                 placeholder="Select fiscal year"
                 required
               />
@@ -753,10 +763,7 @@ export default function Resources() {
                 onChange={(e) =>
                   setForm({ ...form, fiscal_year_id: e.target.value })
                 }
-                options={fiscalYears.map((fy) => ({
-                  value: String(fy.id),
-                  label: fy.name,
-                }))}
+                options={buildFiscalYearOptions(fiscalYears)}
                 placeholder="Select fiscal year"
                 required
               />
@@ -772,8 +779,8 @@ export default function Resources() {
                 required
               />
               <p className="text-xs text-gray-500">
-                Note: Remaining quantity will be automatically calculated based
-                on sales/usage.
+                Remaining stock is recalculated from sold quantities. The total cannot
+                be reduced below sold plus reserved stock.
               </p>
             </>
           )}

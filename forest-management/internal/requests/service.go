@@ -10,11 +10,19 @@ import (
 	"forest-management/pkg/response"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type RequestService struct {
 	db *gorm.DB
 }
+
+var (
+	ErrNoActiveFiscalYear   = errors.New("no active fiscal year is configured")
+	ErrMemberActiveYearOnly = errors.New(
+		"members can submit resource requests only for the active fiscal year",
+	)
+)
 
 func NewRequestService(db *gorm.DB) *RequestService {
 	return &RequestService{db: db}
@@ -51,9 +59,21 @@ func (s *RequestService) CreateRequest(userID uint, input CreateRequestInput) (*
 		return nil, errors.New("invalid resource item")
 	}
 
-	// Validate fiscal year exists
+	// Members are never allowed to choose a previous or future fiscal year.
+	// The backend enforces this rule even when a client tampers with the form.
 	var fiscalYear models.FiscalYear
-	if err := s.db.First(&fiscalYear, input.FiscalYearID).Error; err != nil {
+	if user.Role == "member" {
+		if err := s.db.Where("is_active = ?", true).First(&fiscalYear).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, ErrNoActiveFiscalYear
+			}
+			return nil, fmt.Errorf("failed to load active fiscal year: %w", err)
+		}
+		if input.FiscalYearID != fiscalYear.ID {
+			return nil, ErrMemberActiveYearOnly
+		}
+		input.FiscalYearID = fiscalYear.ID
+	} else if err := s.db.First(&fiscalYear, input.FiscalYearID).Error; err != nil {
 		return nil, errors.New("invalid fiscal year")
 	}
 
@@ -67,9 +87,10 @@ func (s *RequestService) CreateRequest(userID uint, input CreateRequestInput) (*
 	if err != nil {
 		return nil, errors.New("no stock found for this resource in the selected fiscal year")
 	}
-	if stock.RemainingQuantity < input.QuantityRequested {
-		return nil, fmt.Errorf("insufficient stock. Available: %.2f %s, Requested: %.2f %s",
-			stock.RemainingQuantity, resourceItem.Type.Unit, input.QuantityRequested, resourceItem.Type.Unit)
+	availableQuantity := stock.RemainingQuantity - stock.ReservedQuantity
+	if availableQuantity < input.QuantityRequested {
+		return nil, fmt.Errorf("insufficient available stock. Available: %.2f %s, Requested: %.2f %s",
+			availableQuantity, resourceItem.Type.Unit, input.QuantityRequested, resourceItem.Type.Unit)
 	}
 
 	// Create request
@@ -139,6 +160,7 @@ func (s *RequestService) ListRequests(page, perPage int, status, fiscalYearID, m
 		Preload("ResourceItem.Type").
 		Preload("FiscalYear").
 		Preload("Approver").
+		Preload("Payments").
 		Order("requested_at DESC").
 		Offset(offset).
 		Limit(perPage).
@@ -151,9 +173,18 @@ func (s *RequestService) ListRequests(page, perPage int, status, fiscalYearID, m
 	return requests, meta, err
 }
 
-func (s *RequestService) GetRequestByID(id uint) (*models.Request, error) {
+func (s *RequestService) GetRequestByID(id, userID uint, role string) (*models.Request, error) {
 	var req models.Request
-	err := s.db.
+	query := s.db.Model(&models.Request{})
+
+	// Members may only view requests that belong to their own member profile.
+	if role == "member" {
+		query = query.
+			Joins("JOIN members ON members.id = requests.member_id").
+			Where("members.user_id = ?", userID)
+	}
+
+	err := query.
 		Preload("Member").
 		Preload("ResourceItem.Type").
 		Preload("FiscalYear").
@@ -187,6 +218,7 @@ func (s *RequestService) GetMemberRequests(userID uint, page, perPage int, statu
 	err := query.
 		Preload("ResourceItem.Type").
 		Preload("FiscalYear").
+		Preload("Payments").
 		Order("requested_at DESC").
 		Offset(offset).
 		Limit(perPage).
@@ -200,86 +232,82 @@ func (s *RequestService) GetMemberRequests(userID uint, page, perPage int, statu
 }
 
 func (s *RequestService) ApproveRequest(requestID, adminUserID uint, input ApproveRequestInput) (*models.Request, error) {
-	var req models.Request
+	tx := s.db.Begin()
+	if tx.Error != nil {
+		return nil, tx.Error
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+			panic(r)
+		}
+	}()
 
-	if err := s.db.Preload("ResourceItem.Type").First(&req, requestID).Error; err != nil {
+	var req models.Request
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Preload("ResourceItem.Type").First(&req, requestID).Error; err != nil {
+		tx.Rollback()
 		return nil, errors.New("request not found")
 	}
-
 	if req.Status != "pending" {
+		tx.Rollback()
 		return nil, errors.New("only pending requests can be approved")
 	}
 
-	// Get approved quantity
 	quantityApproved := req.QuantityRequested
 	if input.QuantityApproved != nil && *input.QuantityApproved > 0 {
 		if *input.QuantityApproved > req.QuantityRequested {
+			tx.Rollback()
 			return nil, errors.New("approved quantity cannot exceed requested quantity")
 		}
 		quantityApproved = *input.QuantityApproved
 	}
 
-	// Get resource rate
 	var rate models.ResourceRate
-	err := s.db.Where(
-		"resource_item_id = ? AND fiscal_year_id = ?",
-		req.ResourceItemID,
-		req.FiscalYearID,
-	).First(&rate).Error
-
-	if err != nil {
+	if err := tx.Where("resource_item_id = ? AND fiscal_year_id = ?", req.ResourceItemID, req.FiscalYearID).First(&rate).Error; err != nil {
+		tx.Rollback()
 		return nil, errors.New("resource rate not configured for this fiscal year")
 	}
 
-	// Calculate totals
-	totalAmount := quantityApproved * rate.RatePerUnit
-	now := time.Now()
-
-	// Update request
-	updates := map[string]interface{}{
-		"status":            "approved",
-		"quantity_approved": quantityApproved,
-		"rate_per_unit":     rate.RatePerUnit,
-		"total_amount":      totalAmount,
-		"approved_by":       adminUserID,
-		"approved_at":       &now,
+	// Reserve stock during approval. This prevents two approved requests from
+	// selling the same stock while the members are still paying.
+	result := tx.Model(&models.Stock{}).
+		Where("resource_item_id = ? AND fiscal_year_id = ? AND remaining_quantity - reserved_quantity >= ?", req.ResourceItemID, req.FiscalYearID, quantityApproved).
+		UpdateColumn("reserved_quantity", gorm.Expr("reserved_quantity + ?", quantityApproved))
+	if result.Error != nil {
+		tx.Rollback()
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		tx.Rollback()
+		return nil, errors.New("insufficient available stock to approve this request")
 	}
 
+	totalAmount := quantityApproved * rate.RatePerUnit
+	now := time.Now()
+	updates := map[string]interface{}{
+		"status": "approved", "quantity_approved": quantityApproved,
+		"rate_per_unit": rate.RatePerUnit, "total_amount": totalAmount,
+		"approved_by": adminUserID, "approved_at": &now,
+	}
 	if input.Remarks != nil {
 		updates["remarks"] = *input.Remarks
 	}
-
-	if err := s.db.Model(&req).Updates(updates).Error; err != nil {
+	if err := tx.Model(&req).Updates(updates).Error; err != nil {
+		tx.Rollback()
 		return nil, fmt.Errorf("failed to approve request: %w", err)
 	}
-
-	// Reload relations
-	s.db.
-		Preload("Member").
-		Preload("ResourceItem.Type").
-		Preload("Approver").
-		First(&req, requestID)
-
-	// Notify the member
-	notifService := notifications.NewNotificationService(s.db)
-
-	var member models.Member
-	s.db.Preload("User").First(&member, req.MemberID)
-
-	if member.UserID != nil {
-		notifService.NotifyUser(
-			*member.UserID,
-			"Request Approved",
-			fmt.Sprintf(
-				"Your request for %.2f %s of %s has been approved.\nTotal Amount: Rs. %.2f",
-				quantityApproved, req.ResourceItem.Type.Unit, req.ResourceItem.Name, totalAmount,
-			),
-			"success",
-			stringPtr("request"),
-			&req.ID,
-		)
+	if err := tx.Commit().Error; err != nil {
+		return nil, err
 	}
 
+	s.db.Preload("Member").Preload("Member.User").Preload("ResourceItem.Type").Preload("FiscalYear").Preload("Approver").Preload("Payments").First(&req, requestID)
+	if req.Member != nil && req.Member.UserID != nil {
+		notifications.NewNotificationService(s.db).NotifyUser(
+			*req.Member.UserID, "Request Approved",
+			fmt.Sprintf("Your request for %.2f %s of %s has been approved. Total Amount: Rs. %.2f", quantityApproved, req.ResourceItem.Type.Unit, req.ResourceItem.Name, totalAmount),
+			"success", stringPtr("request"), &req.ID,
+		)
+	}
 	return &req, nil
 }
 

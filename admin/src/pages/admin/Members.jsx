@@ -32,7 +32,9 @@ import {
 } from "../../components/ui/Table";
 import LoadingSpinner from "../../components/common/LoadingSpinner";
 import { useToast } from "../../components/common/Toast";
-import { formatDate } from "../../utils/helpers";
+import { formatDate, getImageUrl } from "../../utils/helpers";
+import { Receipt, TrendingUp } from "lucide-react";
+import MemberFinancialModals from "../../components/members/MemberFinancialModals";
 
 const emptyMember = {
   membership_no: "",
@@ -82,13 +84,15 @@ export default function Members() {
   const [refreshing, setRefreshing] = useState(false);
   const photoInputRef = useRef(null);
   const assistantPhotoInputRef = useRef(null);
+  const [showFinancialModals, setShowFinancialModals] = useState(false);
+  const [financialModalType, setFinancialModalType] = useState(null);
 
   const fetchMembers = useCallback(async () => {
     setIsLoading(true);
     try {
       const res = await api.getMembers({
         page,
-        limit: 10,
+        per_page: 10,
         search,
         status: statusFilter || undefined,
       });
@@ -96,7 +100,7 @@ export default function Members() {
         setMembers(res.data || []);
         setTotalPages(res.meta?.total_pages || 1);
       }
-    } catch (err) {
+    } catch {
       addToast("Failed to load members", "error");
     } finally {
       setIsLoading(false);
@@ -175,8 +179,8 @@ export default function Members() {
     setViewingMember(member);
     setShowViewModal(true);
     try {
-      const res = await api.getFamilyMembers(member.id);
-      if (res.success) setFamilyMembers(res.data || []);
+      const familyRes = await api.getFamilyMembers(member.id);
+      if (familyRes.success) setFamilyMembers(familyRes.data || []);
     } catch {
       setFamilyMembers([]);
     }
@@ -266,15 +270,6 @@ export default function Members() {
       family_members: m.family_members || [],
     });
     setShowModal(true);
-  };
-
-  // Helper to get full image URL
-  const getImageUrl = (path) => {
-    if (!path) return null;
-    // If it's already a full URL, return it
-    if (path.startsWith("http")) return path;
-    // Otherwise, prepend the API base URL
-    return path;
   };
 
   return (
@@ -822,7 +817,31 @@ export default function Members() {
                 )}
               </div>
             </div>
-
+            {/* Financial Details Buttons */}
+            <div className="flex justify-center gap-3 mb-4">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setShowFinancialModals(true);
+                  setFinancialModalType("fee");
+                }}
+                className="border-blue-500 text-blue-600 hover:bg-blue-50"
+              >
+                <Receipt size={16} className="mr-1" />
+                गस्ती शुल्क विवरण / Fee Details
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setShowFinancialModals(true);
+                  setFinancialModalType("sales");
+                }}
+                className="border-emerald-500 text-emerald-600 hover:bg-emerald-50"
+              >
+                <TrendingUp size={16} className="mr-1" />
+                बिक्री विवरण / Sales Details
+              </Button>
+            </div>
             {/* Member Info */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
@@ -935,6 +954,18 @@ export default function Members() {
           </div>
         )}
       </Modal>
+      {/* Financial Modals */}
+      {showFinancialModals && (
+        <MemberFinancialModals
+          memberId={viewingMember?.id}
+          memberName={viewingMember?.name}
+          initialModal={financialModalType}
+          onClose={() => {
+            setShowFinancialModals(false);
+            setFinancialModalType(null);
+          }}
+        />
+      )}
 
       {/* Add Family Member Modal */}
       <Modal

@@ -1,6 +1,4 @@
 import { useState, useEffect } from "react";
-import { useSelector } from "react-redux";
-import { motion } from "framer-motion";
 import {
   BarChart,
   Bar,
@@ -43,6 +41,10 @@ import Badge from "../../components/ui/Badge";
 import LoadingSpinner from "../../components/common/LoadingSpinner";
 import { useToast } from "../../components/common/Toast";
 import { formatCurrency, formatNumber, formatDate } from "../../utils/helpers";
+import {
+  buildFiscalYearOptions,
+  getActiveFiscalYearId,
+} from "../../utils/fiscalYears";
 
 const COLORS = [
   "#059669",
@@ -55,7 +57,6 @@ const COLORS = [
 ];
 
 export default function Reports() {
-  const { user } = useSelector((state) => state.auth);
   const { addToast } = useToast();
   const [activeTab, setActiveTab] = useState("dashboard");
   const [isLoading, setIsLoading] = useState(true);
@@ -72,8 +73,9 @@ export default function Reports() {
         const res = await api.getFiscalYears();
         if (res.success && res.data) {
           setFiscalYears(res.data);
-          const activeFY = res.data.find((fy) => fy.is_active);
-          if (activeFY) setSelectedFiscalYear(String(activeFY.id));
+          setSelectedFiscalYear((current) =>
+            current || getActiveFiscalYearId(res.data),
+          );
         }
       } catch (err) {
         console.error("Failed to fetch fiscal years:", err);
@@ -103,7 +105,7 @@ export default function Reports() {
           });
           if (res.success) setFinancialReport(res.data);
         }
-      } catch (err) {
+      } catch {
         addToast(`Failed to load ${activeTab} report`, "error");
       } finally {
         setIsLoading(false);
@@ -156,10 +158,7 @@ export default function Reports() {
           <Select
             value={selectedFiscalYear}
             onChange={(e) => setSelectedFiscalYear(e.target.value)}
-            options={fiscalYears.map((fy) => ({
-              value: String(fy.id),
-              label: fy.name,
-            }))}
+            options={buildFiscalYearOptions(fiscalYears)}
             className="w-48"
           />
         </div>
@@ -502,6 +501,8 @@ export default function Reports() {
                           <TableRow>
                             <TableHead>Resource</TableHead>
                             <TableHead>Total</TableHead>
+                            <TableHead>Reserved</TableHead>
+                            <TableHead>Available</TableHead>
                             <TableHead>Remaining</TableHead>
                             <TableHead>Usage</TableHead>
                           </TableRow>
@@ -516,6 +517,12 @@ export default function Reports() {
                                 </TableCell>
                                 <TableCell>
                                   {item.total_quantity} {item.unit}
+                                </TableCell>
+                                <TableCell className="font-medium text-amber-700">
+                                  {item.reserved_quantity || 0} {item.unit}
+                                </TableCell>
+                                <TableCell className="font-medium text-emerald-700">
+                                  {item.available_quantity || 0} {item.unit}
                                 </TableCell>
                                 <TableCell>
                                   {item.remaining_quantity} {item.unit}
@@ -582,6 +589,25 @@ export default function Reports() {
                     >
                       {formatCurrency(Math.abs(financialReport.net_balance))}
                       {financialReport.net_balance >= 0 ? " CR" : " DR"}
+                    </p>
+                  </CardContent>
+                </Card>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <Card className="border-violet-200 bg-violet-50 dark:border-violet-900/50 dark:bg-violet-950/20">
+                  <CardContent className="p-4">
+                    <p className="text-sm text-violet-700 dark:text-violet-300">Historical Balance Recovered</p>
+                    <p className="text-2xl font-bold text-violet-700 dark:text-violet-300">
+                      {formatCurrency(financialReport.historical_collected || 0)}
+                    </p>
+                  </CardContent>
+                </Card>
+                <Card className="border-amber-200 bg-amber-50 dark:border-amber-900/50 dark:bg-amber-950/20">
+                  <CardContent className="p-4">
+                    <p className="text-sm text-amber-700 dark:text-amber-300">Historical Balance Outstanding</p>
+                    <p className="text-2xl font-bold text-amber-700 dark:text-amber-300">
+                      {formatCurrency(financialReport.historical_outstanding || 0)}
                     </p>
                   </CardContent>
                 </Card>
@@ -682,6 +708,18 @@ export default function Reports() {
                         <span className="text-sm">Fines Collected</span>
                         <span className="font-semibold text-emerald-600">
                           {formatCurrency(financialReport.total_fines)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center p-3 bg-violet-50 rounded-lg dark:bg-violet-950/20">
+                        <span className="text-sm">Historical Amount Recovered</span>
+                        <span className="font-semibold text-violet-700 dark:text-violet-300">
+                          {formatCurrency(financialReport.historical_collected || 0)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center p-3 bg-amber-50 rounded-lg dark:bg-amber-950/20">
+                        <span className="text-sm">Historical Amount Still Due</span>
+                        <span className="font-semibold text-amber-700 dark:text-amber-300">
+                          {formatCurrency(financialReport.historical_outstanding || 0)}
                         </span>
                       </div>
                       <div className="flex justify-between items-center p-3 bg-emerald-50 rounded-lg">

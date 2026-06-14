@@ -14,9 +14,11 @@ func RegisterSamitiRoutes(router *gin.RouterGroup, handler *SamitiHandler) {
 		samitiRoutes.PUT("/settings", middleware.AuthMiddleware(), middleware.RequireRole("admin"), handler.UpdateSettings)
 		samitiRoutes.POST("/settings/upload-logo", middleware.AuthMiddleware(), middleware.RequireRole("admin"), handler.UploadLogo)
 
-		// Committee Heads
+		// Committee Heads. Public endpoints omit login-account metadata.
 		samitiRoutes.GET("/heads", handler.ListHeads)
 		samitiRoutes.GET("/heads/:id", handler.GetHeadByID)
+		samitiRoutes.GET("/manage/heads", middleware.AuthMiddleware(), middleware.RequireRole("admin"), handler.ListHeadsForAdmin)
+		samitiRoutes.GET("/manage/heads/:id", middleware.AuthMiddleware(), middleware.RequireRole("admin"), handler.GetHeadForAdmin)
 		samitiRoutes.POST("/heads", middleware.AuthMiddleware(), middleware.RequireRole("admin"), handler.CreateHead)
 		samitiRoutes.PUT("/heads/:id", middleware.AuthMiddleware(), middleware.RequireRole("admin"), handler.UpdateHead)
 		samitiRoutes.DELETE("/heads/:id", middleware.AuthMiddleware(), middleware.RequireRole("admin"), handler.DeleteHead)

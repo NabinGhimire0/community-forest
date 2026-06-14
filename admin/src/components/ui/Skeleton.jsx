@@ -12,7 +12,7 @@ export default function Skeleton({ className, ...props }) {
   );
 }
 
-export function SkeletonTable({ rows = 5, cols = 4 }) {
+export function SkeletonTable({ rows = 5, cols: _cols = 4 }) {
   return (
     <div className="space-y-3">
       <Skeleton className="h-10 w-full" />

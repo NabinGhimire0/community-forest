@@ -1,33 +1,32 @@
 package members
 
 import (
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"os"
-	"path/filepath"
+	"strings"
 	"time"
 
 	"forest-management/internal/audit"
+	"forest-management/internal/membershipfees"
 	"forest-management/internal/models"
+	"forest-management/pkg/fileutil"
 	"forest-management/pkg/response"
+	"forest-management/pkg/security"
 	"forest-management/pkg/utils"
 
 	"gorm.io/gorm"
 )
 
 type MemberService struct {
-	db  *gorm.DB
-	sms utils.SMSService
+	db *gorm.DB
 }
 
+var ErrMemberUpdateForbidden = errors.New("member update is not allowed for this account")
+
 func NewMemberService(db *gorm.DB) *MemberService {
-	return &MemberService{
-		db:  db,
-		sms: utils.GetSMSService(),
-	}
+	return &MemberService{db: db}
 }
 
 // Credentials holds the plain-text credentials (only shown once to admin)
@@ -36,19 +35,10 @@ type Credentials struct {
 	PlainPassword string
 }
 
-// generateRandomPassword creates a cryptographically secure random password
-func generateRandomPassword(length int) string {
-	chars := "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%"
-	result := make([]byte, length)
-	for i := 0; i < length; i++ {
-		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
-		result[i] = chars[n.Int64()]
-	}
-	return string(result)
-}
-
-// CreateMember creates a member AND user credentials, then sends SMS
-func (s *MemberService) CreateMember(req CreateMemberRequest) (*models.Member, *Credentials, error) {
+// CreateMember creates the official member record and a one-time login credential.
+// Only an administrator may call the route because the temporary password is
+// displayed exactly once and must be handed to the member through a trusted channel.
+func (s *MemberService) CreateMember(req CreateMemberRequest, actorUserID *uint) (*models.Member, *Credentials, error) {
 	tx := s.db.Begin()
 	defer func() {
 		if r := recover(); r != nil {
@@ -67,8 +57,12 @@ func (s *MemberService) CreateMember(req CreateMemberRequest) (*models.Member, *
 		}
 	}
 
-	// 2. Generate a random password (8 characters)
-	plainPassword := generateRandomPassword(8)
+	// 2. Generate a strong temporary password.
+	plainPassword, err := security.GenerateStrongPassword(16)
+	if err != nil {
+		tx.Rollback()
+		return nil, nil, fmt.Errorf("failed to generate temporary password: %w", err)
+	}
 
 	// 3. Hash the password
 	hashedPassword, err := utils.HashPassword(plainPassword)
@@ -77,17 +71,24 @@ func (s *MemberService) CreateMember(req CreateMemberRequest) (*models.Member, *
 		return nil, nil, fmt.Errorf("failed to hash password: %w", err)
 	}
 
-	// 4. Create the User record
-	phoneStr := ""
-	if req.Phone != nil {
-		phoneStr = *req.Phone
+	// 4. Normalize and validate the phone number used as the login identity.
+	if req.Phone == nil {
+		tx.Rollback()
+		return nil, nil, errors.New("phone number is required")
 	}
+	phoneStr, err := security.NormalizeNepalMobile(*req.Phone)
+	if err != nil {
+		tx.Rollback()
+		return nil, nil, err
+	}
+	req.Phone = &phoneStr
 	user := models.User{
-		Name:     req.Name,
-		Phone:    phoneStr,
-		Password: hashedPassword,
-		Role:     "member",
-		Status:   "active",
+		Name:               req.Name,
+		Phone:              phoneStr,
+		Password:           hashedPassword,
+		Role:               "member",
+		Status:             "active",
+		MustChangePassword: true,
 	}
 
 	if err := tx.Create(&user).Error; err != nil {
@@ -138,6 +139,13 @@ func (s *MemberService) CreateMember(req CreateMemberRequest) (*models.Member, *
 		return nil, nil, fmt.Errorf("failed to create member: %w", err)
 	}
 
+	// New members must receive the active fiscal year's Gasti/Membership fee
+	// exactly once when a fee setting is available.
+	if _, err := membershipfees.AssignActiveYearForMember(tx, member); err != nil {
+		tx.Rollback()
+		return nil, nil, fmt.Errorf("failed to assign active fiscal-year membership fee: %w", err)
+	}
+
 	// Commit the transaction
 	if err := tx.Commit().Error; err != nil {
 		return nil, nil, fmt.Errorf("failed to commit transaction: %w", err)
@@ -145,7 +153,7 @@ func (s *MemberService) CreateMember(req CreateMemberRequest) (*models.Member, *
 
 	audit.CreateAuditEntry(
 		s.db,
-		nil,
+		actorUserID,
 		"create",
 		"member",
 		&member.ID,
@@ -160,9 +168,6 @@ func (s *MemberService) CreateMember(req CreateMemberRequest) (*models.Member, *
 		"",
 		"Member created with auto-generated credentials",
 	)
-
-	// Send SMS with credentials (non-blocking)
-	go s.sendCredentialsSMS(phoneStr, plainPassword)
 
 	credentials := &Credentials{
 		Phone:         phoneStr,
@@ -193,17 +198,6 @@ func (s *MemberService) generateMembershipNo(tx *gorm.DB) (string, error) {
 	}
 
 	return fmt.Sprintf("MEM-%04d", nextNum), nil
-}
-
-// sendCredentialsSMS sends login credentials to the member via SMS
-func (s *MemberService) sendCredentialsSMS(phone, password string) {
-	message := fmt.Sprintf(
-		"Ban Samiti: Your account has been created.\nPhone: %s\nPassword: %s\nLogin at your portal.",
-		phone, password,
-	)
-	if err := s.sms.SendSMS(phone, message); err != nil {
-		fmt.Printf("⚠️ Failed to send SMS to %s: %v\n", phone, err)
-	}
 }
 
 // ListMembers returns paginated members with optional search
@@ -285,6 +279,41 @@ func (s *MemberService) UpdateMember(id uint, req UpdateMemberRequest, reqUserID
 		return nil, errors.New("member not found")
 	}
 
+	actorIsAdmin := false
+	if reqUserID != nil {
+		var actor models.User
+		if err := s.db.Select("id", "role").First(&actor, *reqUserID).Error; err != nil {
+			return nil, ErrMemberUpdateForbidden
+		}
+		actorIsAdmin = actor.Role == "admin"
+	}
+	var linkedUser *models.User
+	if member.UserID != nil {
+		var target models.User
+		if err := s.db.Select("id", "phone", "role", "status").First(&target, *member.UserID).Error; err == nil {
+			linkedUser = &target
+		}
+	}
+	if !actorIsAdmin && linkedUser != nil && (linkedUser.Role == "admin" || linkedUser.Role == "staff") {
+		return nil, fmt.Errorf("%w: staff cannot edit a privileged account through the member register", ErrMemberUpdateForbidden)
+	}
+	if !actorIsAdmin && req.Status != nil && *req.Status != member.Status {
+		return nil, fmt.Errorf("%w: only an administrator can change member status", ErrMemberUpdateForbidden)
+	}
+	if !actorIsAdmin && req.Phone != nil {
+		normalizedPhone, err := security.NormalizeNepalMobile(*req.Phone)
+		if err != nil {
+			return nil, err
+		}
+		currentPhone := ""
+		if member.Phone != nil {
+			currentPhone, _ = security.NormalizeNepalMobile(*member.Phone)
+		}
+		if normalizedPhone != currentPhone {
+			return nil, fmt.Errorf("%w: only an administrator can change a login phone number", ErrMemberUpdateForbidden)
+		}
+	}
+
 	// Store old values for audit log
 	oldValues := map[string]interface{}{
 		"name":           member.Name,
@@ -304,6 +333,11 @@ func (s *MemberService) UpdateMember(id uint, req UpdateMemberRequest, reqUserID
 	member.Tole = req.Tole
 
 	if req.Phone != nil {
+		normalizedPhone, err := security.NormalizeNepalMobile(*req.Phone)
+		if err != nil {
+			return nil, err
+		}
+		req.Phone = &normalizedPhone
 		member.Phone = req.Phone
 	}
 
@@ -327,22 +361,49 @@ func (s *MemberService) UpdateMember(id uint, req UpdateMemberRequest, reqUserID
 		member.MembershipNo = req.MembershipNo
 	}
 
-	// Also update the linked User's name and phone
-	if member.UserID != nil && req.Phone != nil {
-		s.db.Model(&models.User{}).
-			Where("id = ?", member.UserID).
-			Updates(map[string]interface{}{
-				"name":  req.Name,
-				"phone": *req.Phone,
-			})
+	// Keep the linked login identity in sync with the official member record.
+	// Status changes must immediately affect authentication as well.
+	tx := s.db.Begin()
+	if tx.Error != nil {
+		return nil, fmt.Errorf("failed to begin member update: %w", tx.Error)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+			panic(r)
+		}
+	}()
+
+	if member.UserID != nil {
+		userUpdates := map[string]interface{}{
+			"name":   req.Name,
+			"status": member.Status,
+		}
+		if req.Phone != nil {
+			userUpdates["phone"] = *req.Phone
+		}
+		if err := tx.Model(&models.User{}).Where("id = ?", *member.UserID).Updates(userUpdates).Error; err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("failed to update linked user: %w", err)
+		}
+		if member.Status != "active" {
+			now := time.Now()
+			if err := tx.Model(&models.UserSession{}).
+				Where("user_id = ? AND revoked_at IS NULL", *member.UserID).
+				Update("revoked_at", now).Error; err != nil {
+				tx.Rollback()
+				return nil, fmt.Errorf("failed to revoke member sessions: %w", err)
+			}
+		}
 	}
 
-	// Save member
-	if err := s.db.Save(&member).Error; err != nil {
+	if err := tx.Save(&member).Error; err != nil {
+		tx.Rollback()
 		return nil, fmt.Errorf("failed to update member: %w", err)
 	}
 
-	// Update family members if provided
+	// Update family members in the same transaction so the member record cannot
+	// be partially updated when a family-row operation fails.
 	if req.FamilyMembers != nil {
 		var familyMembers []models.FamilyMember
 		for _, fmReq := range req.FamilyMembers {
@@ -357,11 +418,20 @@ func (s *MemberService) UpdateMember(id uint, req UpdateMemberRequest, reqUserID
 			})
 		}
 
+		association := tx.Model(&member).Association("FamilyMembers")
 		if len(familyMembers) > 0 {
-			s.db.Model(&member).Association("FamilyMembers").Replace(familyMembers)
-		} else {
-			s.db.Model(&member).Association("FamilyMembers").Clear()
+			if err := association.Replace(familyMembers); err != nil {
+				tx.Rollback()
+				return nil, fmt.Errorf("failed to update family members: %w", err)
+			}
+		} else if err := association.Clear(); err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("failed to clear family members: %w", err)
 		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return nil, fmt.Errorf("failed to commit member update: %w", err)
 	}
 
 	// Audit log
@@ -389,36 +459,58 @@ func (s *MemberService) UpdateMember(id uint, req UpdateMemberRequest, reqUserID
 	return &member, nil
 }
 
-// DeleteMember soft-deletes a member (and their user account)
-func (s *MemberService) DeleteMember(id uint) error {
+// DeleteMember deactivates a member and their login while preserving the
+// official register, financial ledger, documents, and audit history. Permanent
+// deletion is intentionally not supported through the API.
+func (s *MemberService) DeleteMember(id uint, actorUserID *uint) error {
 	var member models.Member
 	if err := s.db.First(&member, id).Error; err != nil {
 		return errors.New("member not found")
 	}
+	if member.Status == "inactive" {
+		return errors.New("member is already inactive")
+	}
 
 	tx := s.db.Begin()
-
-	// Delete family members first
-	if err := tx.Where("member_id = ?", id).Delete(&models.FamilyMember{}).Error; err != nil {
+	if tx.Error != nil {
+		return tx.Error
+	}
+	member.Status = "inactive"
+	if err := tx.Save(&member).Error; err != nil {
 		tx.Rollback()
 		return err
 	}
-
-	// Delete the user account
 	if member.UserID != nil {
-		if err := tx.Delete(&models.User{}, member.UserID).Error; err != nil {
+		if err := tx.Model(&models.User{}).Where("id = ?", *member.UserID).
+			Update("status", "inactive").Error; err != nil {
+			tx.Rollback()
+			return err
+		}
+		now := time.Now()
+		if err := tx.Model(&models.UserSession{}).
+			Where("user_id = ? AND revoked_at IS NULL", *member.UserID).
+			Update("revoked_at", now).Error; err != nil {
 			tx.Rollback()
 			return err
 		}
 	}
-
-	// Delete the member
-	if err := tx.Delete(&member).Error; err != nil {
-		tx.Rollback()
+	if err := tx.Commit().Error; err != nil {
 		return err
 	}
 
-	return tx.Commit().Error
+	audit.CreateAuditEntry(
+		s.db,
+		actorUserID,
+		"deactivate",
+		"member",
+		&member.ID,
+		map[string]interface{}{"status": "active"},
+		map[string]interface{}{"status": "inactive"},
+		"",
+		"",
+		"Member and linked login deactivated; historical records preserved",
+	)
+	return nil
 }
 
 // AddFamilyMember adds a family member to a member's family
@@ -452,7 +544,40 @@ func (s *MemberService) ListFamilyMembers(memberID uint) ([]models.FamilyMember,
 	return family, err
 }
 
-// ResetCredentials generates a new password and sends it via SMS
+// UpdateFamilyMember updates a family member while enforcing parent-member ownership.
+func (s *MemberService) UpdateFamilyMember(memberID, familyID uint, req FamilyMemberRequest) (*models.FamilyMember, error) {
+	var familyMember models.FamilyMember
+	if err := s.db.Where("id = ? AND member_id = ?", familyID, memberID).First(&familyMember).Error; err != nil {
+		return nil, errors.New("family member not found")
+	}
+
+	familyMember.Name = req.Name
+	familyMember.Relation = req.Relation
+	familyMember.Age = req.Age
+	familyMember.Gender = req.Gender
+	familyMember.CitizenshipNo = req.CitizenshipNo
+	familyMember.Remarks = req.Remarks
+
+	if err := s.db.Save(&familyMember).Error; err != nil {
+		return nil, fmt.Errorf("failed to update family member: %w", err)
+	}
+
+	return &familyMember, nil
+}
+
+// DeleteFamilyMember deletes a family member only from the specified parent member.
+func (s *MemberService) DeleteFamilyMember(memberID, familyID uint) error {
+	result := s.db.Where("id = ? AND member_id = ?", familyID, memberID).Delete(&models.FamilyMember{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return errors.New("family member not found")
+	}
+	return nil
+}
+
+// ResetCredentials generates a one-time temporary password and revokes all existing sessions
 func (s *MemberService) ResetCredentials(memberID uint) (*Credentials, error) {
 	var member models.Member
 	if err := s.db.Preload("User").First(&member, memberID).Error; err != nil {
@@ -463,21 +588,29 @@ func (s *MemberService) ResetCredentials(memberID uint) (*Credentials, error) {
 		return nil, errors.New("member has no linked user account")
 	}
 
-	// Generate new password
-	plainPassword := generateRandomPassword(8)
+	// Generate a strong one-time temporary password.
+	plainPassword, err := security.GenerateStrongPassword(16)
+	if err != nil {
+		return nil, err
+	}
 	hashedPassword, err := utils.HashPassword(plainPassword)
 	if err != nil {
 		return nil, err
 	}
 
-	// Update user's password
-	if err := s.db.Model(&models.User{}).Where("id = ?", member.User.ID).
-		Update("password", hashedPassword).Error; err != nil {
+	// Update the password, force a change at next login, and revoke old sessions.
+	now := time.Now().UTC()
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.User{}).Where("id = ?", member.User.ID).Updates(map[string]interface{}{
+			"password": hashedPassword, "must_change_password": true,
+			"password_changed_at": now, "failed_login_attempts": 0, "locked_until": nil,
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&models.UserSession{}).Where("user_id = ? AND revoked_at IS NULL", member.User.ID).Update("revoked_at", now).Error
+	}); err != nil {
 		return nil, err
 	}
-
-	// Send new credentials via SMS
-	go s.sendCredentialsSMS(member.User.Phone, plainPassword)
 
 	return &Credentials{
 		Phone:         member.User.Phone,
@@ -485,93 +618,219 @@ func (s *MemberService) ResetCredentials(memberID uint) (*Credentials, error) {
 	}, nil
 }
 
-// UploadMemberPhoto saves the member photo and returns the URL
+// UploadMemberPhoto securely stores a member image outside the public web root.
 func (s *MemberService) UploadMemberPhoto(memberID uint, file io.Reader, filename string) (string, error) {
 	var member models.Member
 	if err := s.db.First(&member, memberID).Error; err != nil {
 		return "", errors.New("member not found")
 	}
-
-	// Create uploads directory if not exists
-	uploadDir := "./uploads/members"
-	if err := os.MkdirAll(uploadDir, os.ModePerm); err != nil {
-		return "", fmt.Errorf("failed to create upload directory: %w", err)
-	}
-
-	// Generate unique filename
-	ext := filepath.Ext(filename)
-	if ext == "" {
-		ext = ".jpg"
-	}
-	uniqueName := fmt.Sprintf("member_%d_photo_%d%s", memberID, time.Now().UnixNano(), ext)
-	filePath := filepath.Join(uploadDir, uniqueName)
-	// Use full URL with /api prefix since we proxy
-	fileURL := fmt.Sprintf("/uploads/members/%s", uniqueName)
-
-	// Save file
-	dst, err := os.Create(filePath)
+	saved, err := fileutil.Save(file, "members", fmt.Sprintf("member-%d-photo", memberID), fileutil.ImagePolicy)
 	if err != nil {
-		return "", fmt.Errorf("failed to create file: %w", err)
+		return "", err
 	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, file); err != nil {
-		os.Remove(filePath)
-		return "", fmt.Errorf("failed to save file: %w", err)
-	}
-
-	// Update member with photo URL
-	if err := s.db.Model(&member).Update("photo", fileURL).Error; err != nil {
-		os.Remove(filePath)
+	if err := s.db.Model(&member).Update("photo", saved.URL).Error; err != nil {
+		_ = os.Remove(saved.Path)
 		return "", fmt.Errorf("failed to update member: %w", err)
 	}
-
-	// Fetch updated member to return
-	var updatedMember models.Member
-	s.db.First(&updatedMember, memberID)
-
-	return fileURL, nil
+	return saved.URL, nil
 }
 
-// UploadAssistantPhoto saves the assistant photo and returns the URL
+// UploadAssistantPhoto securely stores an assistant-household-head image.
 func (s *MemberService) UploadAssistantPhoto(memberID uint, file io.Reader, filename string) (string, error) {
 	var member models.Member
 	if err := s.db.First(&member, memberID).Error; err != nil {
 		return "", errors.New("member not found")
 	}
-
-	// Create uploads directory if not exists
-	uploadDir := "./uploads/members"
-	if err := os.MkdirAll(uploadDir, os.ModePerm); err != nil {
-		return "", fmt.Errorf("failed to create upload directory: %w", err)
-	}
-
-	// Generate unique filename
-	ext := filepath.Ext(filename)
-	if ext == "" {
-		ext = ".jpg"
-	}
-	uniqueName := fmt.Sprintf("member_%d_assistant_%d%s", memberID, time.Now().UnixNano(), ext)
-	filePath := filepath.Join(uploadDir, uniqueName)
-	fileURL := fmt.Sprintf("/uploads/members/%s", uniqueName)
-
-	// Save file
-	dst, err := os.Create(filePath)
+	saved, err := fileutil.Save(file, "members", fmt.Sprintf("member-%d-assistant", memberID), fileutil.ImagePolicy)
 	if err != nil {
-		return "", fmt.Errorf("failed to create file: %w", err)
+		return "", err
 	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, file); err != nil {
-		os.Remove(filePath)
-		return "", fmt.Errorf("failed to save file: %w", err)
-	}
-
-	// Update member with assistant photo URL
-	if err := s.db.Model(&member).Update("assistant_photo", fileURL).Error; err != nil {
-		os.Remove(filePath)
+	if err := s.db.Model(&member).Update("assistant_photo", saved.URL).Error; err != nil {
+		_ = os.Remove(saved.Path)
 		return "", fmt.Errorf("failed to update member: %w", err)
 	}
+	return saved.URL, nil
+}
 
-	return fileURL, nil
+// GetMemberFinancialSummary returns a single, non-duplicated ledger summary.
+// Draft and reversed legacy entries remain visible in detail screens but do not
+// affect financial totals until they are verified.
+func (s *MemberService) GetMemberFinancialSummary(memberID uint) (map[string]interface{}, error) {
+	var member models.Member
+	if err := s.db.First(&member, memberID).Error; err != nil {
+		return nil, errors.New("member not found")
+	}
+
+	var transactions []models.Transaction
+	if err := s.db.Preload("FiscalYear").Preload("ResourceItem.Type").
+		Where("member_id = ? AND (record_status = ? OR record_status = '')", memberID, "verified").
+		Order("date DESC, id DESC").Find(&transactions).Error; err != nil {
+		return nil, err
+	}
+
+	var timberPaid, firewoodPaid, otherSalesPaid, feePaid, finePaid float64
+	var totalPaid, totalDue, historicalOutstanding, historicalCollected float64
+	for _, txn := range transactions {
+		totalPaid += txn.AmountPaid
+		totalDue += txn.AmountRemaining
+		if strings.HasPrefix(txn.Type, "legacy_") {
+			historicalOutstanding += txn.AmountRemaining
+			historicalCollected += txn.AmountPaid
+		}
+		switch txn.Type {
+		case "membership_fee", historicalFeeType:
+			feePaid += txn.AmountPaid
+		case "fine":
+			finePaid += txn.AmountPaid
+		case historicalTimberSaleType:
+			timberPaid += txn.AmountPaid
+		case historicalFirewoodSaleType:
+			firewoodPaid += txn.AmountPaid
+		case historicalOtherSaleType:
+			otherSalesPaid += txn.AmountPaid
+		default:
+			if txn.Type == "resource_sale" && txn.ResourceItem != nil && txn.ResourceItem.Type != nil {
+				switch strings.ToLower(txn.ResourceItem.Type.Name) {
+				case "timber", "काठ":
+					timberPaid += txn.AmountPaid
+				case "firewood", "दाउरा":
+					firewoodPaid += txn.AmountPaid
+				default:
+					otherSalesPaid += txn.AmountPaid
+				}
+			}
+		}
+	}
+
+	return map[string]interface{}{
+		"member_name": member.Name, "membership_no": member.MembershipNo,
+		"total_timber_sales": timberPaid, "total_firewood_sales": firewoodPaid,
+		"total_other_sales": otherSalesPaid, "total_membership_fees": feePaid,
+		"total_fines": finePaid, "total_paid": totalPaid, "total_due": totalDue,
+		"historical_outstanding": historicalOutstanding,
+		"historical_collected":   historicalCollected,
+		"transactions":           transactions,
+	}, nil
+}
+
+func (s *MemberService) attachTransactionDocuments(rows []models.Transaction) {
+	for i := range rows {
+		var docs []models.FileUpload
+		if s.db.Where("entity = ? AND entity_id = ?", "transaction", rows[i].ID).
+			Order("created_at DESC").Find(&docs).Error == nil {
+			rows[i].Documents = docs
+		}
+	}
+}
+
+// GetMemberFeeDetails returns current membership fees and historical Gasti fee balances.
+func (s *MemberService) GetMemberFeeDetails(memberID uint) (map[string]interface{}, error) {
+	var member models.Member
+	if err := s.db.First(&member, memberID).Error; err != nil {
+		return nil, errors.New("member not found")
+	}
+
+	var rows []models.Transaction
+	if err := s.db.Preload("FiscalYear").Preload("EnteredByUser").Preload("VerifiedByUser").
+		Where("member_id = ? AND type IN ?", memberID, []string{"membership_fee", historicalFeeType}).
+		Order("date DESC, id DESC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	s.attachTransactionDocuments(rows)
+
+	var totalAmount, totalPaid, totalRemaining float64
+	for _, txn := range rows {
+		if txn.RecordStatus == "verified" || txn.RecordStatus == "" {
+			totalAmount += txn.TotalAmount
+			totalPaid += txn.AmountPaid
+			totalRemaining += txn.AmountRemaining
+		}
+	}
+	return map[string]interface{}{
+		"member_name": member.Name, "membership_no": member.MembershipNo,
+		"transactions": rows, "total_amount": totalAmount,
+		"total_paid": totalPaid, "total_remaining": totalRemaining,
+	}, nil
+}
+
+// GetMemberSalesDetails returns current resource sales and historical sales balances.
+func (s *MemberService) GetMemberSalesDetails(memberID uint) (map[string]interface{}, error) {
+	var member models.Member
+	if err := s.db.First(&member, memberID).Error; err != nil {
+		return nil, errors.New("member not found")
+	}
+
+	var rows []models.Transaction
+	if err := s.db.Preload("FiscalYear").Preload("ResourceItem.Type").Preload("EnteredByUser").Preload("VerifiedByUser").
+		Where("member_id = ? AND type IN ?", memberID, []string{"resource_sale", historicalTimberSaleType, historicalFirewoodSaleType, historicalOtherSaleType}).
+		Order("date DESC, id DESC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	s.attachTransactionDocuments(rows)
+
+	var timberTotal, firewoodTotal, otherTotal, received, remaining float64
+	list := make([]map[string]interface{}, 0, len(rows))
+	for _, txn := range rows {
+		category, itemName := "अन्य / Other", "-"
+		switch txn.Type {
+		case historicalTimberSaleType:
+			category = "काठ / Timber"
+		case historicalFirewoodSaleType:
+			category = "दाउरा / Firewood"
+		case historicalOtherSaleType:
+			category = "अन्य / Other"
+		default:
+			if txn.ResourceItem != nil {
+				itemName = txn.ResourceItem.Name
+			}
+			if txn.ResourceItem != nil && txn.ResourceItem.Type != nil {
+				switch strings.ToLower(txn.ResourceItem.Type.Name) {
+				case "timber", "काठ":
+					category = "काठ / Timber"
+				case "firewood", "दाउरा":
+					category = "दाउरा / Firewood"
+				default:
+					category = txn.ResourceItem.Type.Name
+				}
+			}
+		}
+
+		countInTotals := txn.RecordStatus == "verified" || txn.RecordStatus == ""
+		if countInTotals {
+			switch category {
+			case "काठ / Timber":
+				timberTotal += txn.TotalAmount
+			case "दाउरा / Firewood":
+				firewoodTotal += txn.TotalAmount
+			default:
+				otherTotal += txn.TotalAmount
+			}
+			received += txn.AmountPaid
+			remaining += txn.AmountRemaining
+		}
+		fiscalYearName := "-"
+		if txn.FiscalYear != nil {
+			fiscalYearName = txn.FiscalYear.Name
+		}
+		list = append(list, map[string]interface{}{
+			"id": txn.ID, "type": txn.Type, "is_legacy": strings.HasPrefix(txn.Type, "legacy_"),
+			"source": txn.Source, "record_status": txn.RecordStatus,
+			"date": txn.Date, "receipt_no": txn.ReceiptNo,
+			"physical_reference": txn.PhysicalReference,
+			"description":        category, "item_name": itemName,
+			"quantity": txn.Quantity, "rate": txn.RatePerUnit,
+			"total_amount": txn.TotalAmount, "paid_amount": txn.AmountPaid,
+			"amount_paid": txn.AmountPaid, "remaining": txn.AmountRemaining,
+			"amount_remaining": txn.AmountRemaining, "fiscal_year": fiscalYearName,
+			"fiscal_year_object": txn.FiscalYear, "remarks": txn.Remarks,
+			"documents": txn.Documents, "entered_by_user": txn.EnteredByUser,
+			"verified_by_user": txn.VerifiedByUser, "verified_at": txn.VerifiedAt,
+			"reversal_reason": txn.ReversalReason,
+		})
+	}
+	return map[string]interface{}{
+		"member_name": member.Name, "membership_no": member.MembershipNo,
+		"transactions": list, "timber_total": timberTotal, "firewood_total": firewoodTotal,
+		"other_total": otherTotal, "total_received": received, "total_remaining": remaining,
+	}, nil
 }

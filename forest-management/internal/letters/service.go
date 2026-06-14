@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
 
 	"forest-management/internal/models"
+	"forest-management/pkg/fileutil"
 	"forest-management/pkg/response"
 
 	"gorm.io/gorm"
@@ -54,6 +54,7 @@ func (s *LetterService) CreateLetter(userID uint, input CreateLetterInput) (*mod
 		SentDate:     sentDate,
 		DocumentFile: input.DocumentFile,
 		Remarks:      input.Remarks,
+		Status:       "active",
 		CreatedBy:    userID,
 	}
 
@@ -69,7 +70,7 @@ func (s *LetterService) ListLetters(page, perPage int, letterType, search string
 	var letters []models.Letter
 	var total int64
 
-	query := s.db.Model(&models.Letter{})
+	query := s.db.Model(&models.Letter{}).Where("status = ?", "active")
 
 	if letterType != "" {
 		query = query.Where("type = ?", letterType)
@@ -103,13 +104,13 @@ func (s *LetterService) ListLetters(page, perPage int, letterType, search string
 
 func (s *LetterService) GetLetterByID(id uint) (*models.Letter, error) {
 	var letter models.Letter
-	err := s.db.Preload("Creator").First(&letter, id).Error
+	err := s.db.Preload("Creator").Where("status = ?", "active").First(&letter, id).Error
 	return &letter, err
 }
 
 func (s *LetterService) UpdateLetter(id uint, userID uint, input UpdateLetterInput) (*models.Letter, error) {
 	var letter models.Letter
-	if err := s.db.First(&letter, id).Error; err != nil {
+	if err := s.db.Where("status = ?", "active").First(&letter, id).Error; err != nil {
 		return nil, errors.New("letter not found")
 	}
 
@@ -135,17 +136,19 @@ func (s *LetterService) UpdateLetter(id uint, userID uint, input UpdateLetterInp
 	}
 	if input.LetterDate != nil {
 		letterDate, err := time.Parse("2006-01-02", *input.LetterDate)
-		if err == nil {
-			updates["letter_date"] = letterDate
+		if err != nil {
+			return nil, errors.New("invalid letter date format")
 		}
+		updates["letter_date"] = letterDate
 	}
 	if input.ReceivedDate != nil {
 		var receivedDate *time.Time
 		if *input.ReceivedDate != "" {
 			t, err := time.Parse("2006-01-02", *input.ReceivedDate)
-			if err == nil {
-				receivedDate = &t
+			if err != nil {
+				return nil, errors.New("invalid received date format")
 			}
+			receivedDate = &t
 		}
 		updates["received_date"] = receivedDate
 	}
@@ -153,9 +156,10 @@ func (s *LetterService) UpdateLetter(id uint, userID uint, input UpdateLetterInp
 		var sentDate *time.Time
 		if *input.SentDate != "" {
 			t, err := time.Parse("2006-01-02", *input.SentDate)
-			if err == nil {
-				sentDate = &t
+			if err != nil {
+				return nil, errors.New("invalid sent date format")
 			}
+			sentDate = &t
 		}
 		updates["sent_date"] = sentDate
 	}
@@ -178,56 +182,29 @@ func (s *LetterService) UpdateLetter(id uint, userID uint, input UpdateLetterInp
 
 func (s *LetterService) DeleteLetter(id uint) error {
 	var letter models.Letter
-	if err := s.db.First(&letter, id).Error; err != nil {
+	if err := s.db.Where("status = ?", "active").First(&letter, id).Error; err != nil {
 		return errors.New("letter not found")
 	}
 
-	// Delete associated document file if exists
-	if letter.DocumentFile != nil && *letter.DocumentFile != "" {
-		// Extract filename from URL
-		filePath := "." + *letter.DocumentFile
-		os.Remove(filePath)
-	}
-
-	return s.db.Delete(&letter).Error
+	// Official correspondence is deactivated instead of having its document
+	// silently removed. Keep the row and evidence for auditability.
+	return s.db.Model(&letter).Update("status", "archived").Error
 }
 
-// UploadDocument saves the document file and returns the URL
+// UploadDocument securely stores letter evidence. Production intentionally
+// accepts only PDF or raster images; active-content office files are rejected.
 func (s *LetterService) UploadDocument(letterID uint, file io.Reader, filename string) (string, error) {
 	var letter models.Letter
 	if err := s.db.First(&letter, letterID).Error; err != nil {
 		return "", errors.New("letter not found")
 	}
-
-	// Create uploads directory if not exists
-	uploadDir := "./uploads/letters"
-	if err := os.MkdirAll(uploadDir, os.ModePerm); err != nil {
-		return "", fmt.Errorf("failed to create upload directory: %w", err)
-	}
-
-	// Generate unique filename
-	ext := filepath.Ext(filename)
-	uniqueName := fmt.Sprintf("letter_%d_%d%s", letterID, time.Now().UnixNano(), ext)
-	filePath := filepath.Join(uploadDir, uniqueName)
-	fileURL := fmt.Sprintf("/uploads/letters/%s", uniqueName)
-
-	// Save file
-	dst, err := os.Create(filePath)
+	saved, err := fileutil.Save(file, "letters", fmt.Sprintf("letter-%d", letterID), fileutil.EvidencePolicy)
 	if err != nil {
-		return "", fmt.Errorf("failed to create file: %w", err)
+		return "", err
 	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, file); err != nil {
-		os.Remove(filePath)
-		return "", fmt.Errorf("failed to save file: %w", err)
-	}
-
-	// Update letter with document URL
-	if err := s.db.Model(&letter).Update("document_file", fileURL).Error; err != nil {
-		os.Remove(filePath)
+	if err := s.db.Model(&letter).Update("document_file", saved.URL).Error; err != nil {
+		_ = os.Remove(saved.Path)
 		return "", fmt.Errorf("failed to update letter: %w", err)
 	}
-
-	return fileURL, nil
+	return saved.URL, nil
 }

@@ -5,14 +5,16 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
+	"strings"
 	"time"
 
 	"forest-management/internal/models"
 	"forest-management/internal/notifications"
+	"forest-management/pkg/fileutil"
 	"forest-management/pkg/response"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type FineService struct {
@@ -144,6 +146,10 @@ func (s *FineService) UpdateFine(id uint, adminUserID uint, input UpdateFineInpu
 		return nil, errors.New("fine not found")
 	}
 
+	if fine.Status != "pending" {
+		return nil, errors.New("paid or waived fines cannot be edited; create a corrective record instead")
+	}
+
 	updates := make(map[string]interface{})
 
 	if input.ViolationType != nil {
@@ -153,6 +159,9 @@ func (s *FineService) UpdateFine(id uint, adminUserID uint, input UpdateFineInpu
 		updates["description"] = *input.Description
 	}
 	if input.FineAmount != nil {
+		if *input.FineAmount <= 0 {
+			return nil, errors.New("fine amount must be greater than zero")
+		}
 		updates["fine_amount"] = *input.FineAmount
 	}
 	if input.IncidentDate != nil {
@@ -187,7 +196,7 @@ func (s *FineService) UpdateFineStatus(id uint, adminUserID uint, input UpdateFi
 	}()
 
 	var fine models.Fine
-	if err := tx.Preload("Member").Preload("Member.User").First(&fine, id).Error; err != nil {
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Preload("Member").Preload("Member.User").First(&fine, id).Error; err != nil {
 		tx.Rollback()
 		return nil, errors.New("fine not found")
 	}
@@ -199,6 +208,11 @@ func (s *FineService) UpdateFineStatus(id uint, adminUserID uint, input UpdateFi
 	if fine.Status == "waived" {
 		tx.Rollback()
 		return nil, errors.New("fine already waived")
+	}
+
+	if input.Status == "paid" && (input.PaymentReference == nil || strings.TrimSpace(*input.PaymentReference) == "") {
+		tx.Rollback()
+		return nil, errors.New("payment_reference is required when marking a fine paid")
 	}
 
 	updates := map[string]interface{}{
@@ -214,8 +228,9 @@ func (s *FineService) UpdateFineStatus(id uint, adminUserID uint, input UpdateFi
 		return nil, fmt.Errorf("failed to update fine status: %w", err)
 	}
 
-	// If fine is paid, create a transaction record
-	if input.Status == "paid" {
+	// Member-linked paid fines are added to that member's ledger. Non-member
+	// fines remain fully recorded on the fine itself without dereferencing nil.
+	if input.Status == "paid" && fine.MemberID != nil {
 		now := time.Now()
 		receiptNo := fmt.Sprintf("FINE-REC-%d-%d", now.Year(), fine.ID)
 
@@ -251,7 +266,11 @@ func (s *FineService) UpdateFineStatus(id uint, adminUserID uint, input UpdateFi
 		notifService := notifications.NewNotificationService(s.db)
 		var message string
 		if input.Status == "paid" {
-			message = fmt.Sprintf("Your fine of Rs. %.2f has been paid. Receipt: %s", fine.FineAmount, *input.PaymentReference)
+			reference := "recorded"
+			if input.PaymentReference != nil && strings.TrimSpace(*input.PaymentReference) != "" {
+				reference = strings.TrimSpace(*input.PaymentReference)
+			}
+			message = fmt.Sprintf("Your fine of Rs. %.2f has been paid. Reference: %s", fine.FineAmount, reference)
 		} else {
 			message = fmt.Sprintf("Your fine of Rs. %.2f has been waived.", fine.FineAmount)
 		}
@@ -274,12 +293,10 @@ func (s *FineService) DeleteFine(id uint) error {
 		return errors.New("fine not found")
 	}
 
-	// Delete associated photo if exists
-	if fine.Photo != nil && *fine.Photo != "" {
-		filePath := "." + *fine.Photo
-		os.Remove(filePath)
+	if fine.Status != "pending" {
+		return errors.New("paid or waived fines cannot be deleted")
 	}
-
+	// Preserve the row and attached evidence through a soft delete.
 	return s.db.Delete(&fine).Error
 }
 
@@ -315,47 +332,21 @@ func (s *FineService) GetFineStatistics(fiscalYearID string) (map[string]interfa
 	}, nil
 }
 
-// UploadPhoto saves the fine photo and returns the URL
+// UploadPhoto securely stores fine evidence as an image or PDF.
 func (s *FineService) UploadPhoto(fineID uint, file io.Reader, filename string) (string, error) {
 	var fine models.Fine
 	if err := s.db.First(&fine, fineID).Error; err != nil {
 		return "", errors.New("fine not found")
 	}
-
-	// Create uploads directory if not exists
-	uploadDir := "./uploads/fines"
-	if err := os.MkdirAll(uploadDir, os.ModePerm); err != nil {
-		return "", fmt.Errorf("failed to create upload directory: %w", err)
-	}
-
-	// Generate unique filename
-	ext := filepath.Ext(filename)
-	if ext == "" {
-		ext = ".jpg"
-	}
-	uniqueName := fmt.Sprintf("fine_%d_%d%s", fineID, time.Now().UnixNano(), ext)
-	filePath := filepath.Join(uploadDir, uniqueName)
-	fileURL := fmt.Sprintf("/uploads/fines/%s", uniqueName)
-
-	// Save file
-	dst, err := os.Create(filePath)
+	saved, err := fileutil.Save(file, "fines", fmt.Sprintf("fine-%d", fineID), fileutil.EvidencePolicy)
 	if err != nil {
-		return "", fmt.Errorf("failed to create file: %w", err)
+		return "", err
 	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, file); err != nil {
-		os.Remove(filePath)
-		return "", fmt.Errorf("failed to save file: %w", err)
-	}
-
-	// Update fine with photo URL
-	if err := s.db.Model(&fine).Update("photo", fileURL).Error; err != nil {
-		os.Remove(filePath)
+	if err := s.db.Model(&fine).Update("photo", saved.URL).Error; err != nil {
+		_ = os.Remove(saved.Path)
 		return "", fmt.Errorf("failed to update fine: %w", err)
 	}
-
-	return fileURL, nil
+	return saved.URL, nil
 }
 
 func stringPtr(s string) *string {

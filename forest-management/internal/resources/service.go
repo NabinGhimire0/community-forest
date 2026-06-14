@@ -173,6 +173,16 @@ func (s *ResourceService) DeleteItem(id uint) error {
 	if stockCount > 0 {
 		return errors.New("cannot delete: item has stock entries")
 	}
+	var requestCount int64
+	s.db.Model(&models.Request{}).Where("resource_item_id = ?", id).Count(&requestCount)
+	if requestCount > 0 {
+		return errors.New("cannot delete: item is referenced by resource requests")
+	}
+	var transactionCount int64
+	s.db.Model(&models.Transaction{}).Where("resource_item_id = ?", id).Count(&transactionCount)
+	if transactionCount > 0 {
+		return errors.New("cannot delete: item is referenced by financial transactions")
+	}
 
 	return s.db.Delete(&models.ResourceItem{}, id).Error
 }
@@ -180,6 +190,9 @@ func (s *ResourceService) DeleteItem(id uint) error {
 // ==================== Resource Rates ====================
 
 func (s *ResourceService) SetRate(input SetRateInput) (*models.ResourceRate, error) {
+	if input.RatePerUnit <= 0 {
+		return nil, errors.New("rate per unit must be greater than zero")
+	}
 	// Validate item exists
 	var item models.ResourceItem
 	if err := s.db.First(&item, input.ResourceItemID).Error; err != nil {
@@ -239,6 +252,9 @@ func (s *ResourceService) GetRateByID(id uint) (*models.ResourceRate, error) {
 }
 
 func (s *ResourceService) UpdateRate(id uint, input UpdateRateInput) (*models.ResourceRate, error) {
+	if input.RatePerUnit <= 0 {
+		return nil, errors.New("rate per unit must be greater than zero")
+	}
 	var rate models.ResourceRate
 	if err := s.db.First(&rate, id).Error; err != nil {
 		return nil, errors.New("rate not found")
@@ -253,12 +269,28 @@ func (s *ResourceService) UpdateRate(id uint, input UpdateRateInput) (*models.Re
 }
 
 func (s *ResourceService) DeleteRate(id uint) error {
-	return s.db.Delete(&models.ResourceRate{}, id).Error
+	var rate models.ResourceRate
+	if err := s.db.First(&rate, id).Error; err != nil {
+		return errors.New("rate not found")
+	}
+	var count int64
+	s.db.Model(&models.Request{}).Where("resource_item_id = ? AND fiscal_year_id = ?", rate.ResourceItemID, rate.FiscalYearID).Count(&count)
+	if count > 0 {
+		return errors.New("cannot delete: rate belongs to a fiscal year with resource requests")
+	}
+	s.db.Model(&models.Transaction{}).Where("resource_item_id = ? AND fiscal_year_id = ?", rate.ResourceItemID, rate.FiscalYearID).Count(&count)
+	if count > 0 {
+		return errors.New("cannot delete: rate belongs to a fiscal year with financial transactions")
+	}
+	return s.db.Delete(&rate).Error
 }
 
 // ==================== Stock ====================
 
 func (s *ResourceService) UpdateStock(input UpdateStockInput) (*models.Stock, error) {
+	if input.TotalQuantity < 0 {
+		return nil, errors.New("total quantity cannot be negative")
+	}
 	// Validate item exists
 	var item models.ResourceItem
 	if err := s.db.First(&item, input.ResourceItemID).Error; err != nil {
@@ -280,10 +312,11 @@ func (s *ResourceService) UpdateStock(input UpdateStockInput) (*models.Stock, er
 	if result.Error == nil {
 		// Calculate how much has been used/sold
 		used := existing.TotalQuantity - existing.RemainingQuantity
-		newRemaining := input.TotalQuantity - used
-		if newRemaining < 0 {
-			newRemaining = 0
+		minimumTotal := used + existing.ReservedQuantity
+		if input.TotalQuantity < minimumTotal {
+			return nil, fmt.Errorf("total quantity cannot be less than used plus reserved stock (minimum %.2f)", minimumTotal)
 		}
+		newRemaining := input.TotalQuantity - used
 
 		if err := s.db.Model(&existing).Updates(map[string]interface{}{
 			"total_quantity":     input.TotalQuantity,
@@ -327,6 +360,9 @@ func (s *ResourceService) GetStockByID(id uint) (*models.Stock, error) {
 }
 
 func (s *ResourceService) UpdateStockQuantity(id uint, input UpdateStockQuantityInput) (*models.Stock, error) {
+	if input.TotalQuantity < 0 {
+		return nil, errors.New("total quantity cannot be negative")
+	}
 	var stock models.Stock
 	if err := s.db.First(&stock, id).Error; err != nil {
 		return nil, errors.New("stock not found")
@@ -334,10 +370,11 @@ func (s *ResourceService) UpdateStockQuantity(id uint, input UpdateStockQuantity
 
 	// Calculate remaining quantity based on new total
 	used := stock.TotalQuantity - stock.RemainingQuantity
-	newRemaining := input.TotalQuantity - used
-	if newRemaining < 0 {
-		newRemaining = 0
+	minimumTotal := used + stock.ReservedQuantity
+	if input.TotalQuantity < minimumTotal {
+		return nil, fmt.Errorf("total quantity cannot be less than used plus reserved stock (minimum %.2f)", minimumTotal)
 	}
+	newRemaining := input.TotalQuantity - used
 
 	if err := s.db.Model(&stock).Updates(map[string]interface{}{
 		"total_quantity":     input.TotalQuantity,
@@ -351,5 +388,21 @@ func (s *ResourceService) UpdateStockQuantity(id uint, input UpdateStockQuantity
 }
 
 func (s *ResourceService) DeleteStock(id uint) error {
-	return s.db.Delete(&models.Stock{}, id).Error
+	var stock models.Stock
+	if err := s.db.First(&stock, id).Error; err != nil {
+		return errors.New("stock not found")
+	}
+	if stock.ReservedQuantity != 0 || stock.RemainingQuantity != stock.TotalQuantity {
+		return errors.New("cannot delete stock that is reserved or has movement history")
+	}
+	var count int64
+	s.db.Model(&models.Request{}).Where("resource_item_id = ? AND fiscal_year_id = ?", stock.ResourceItemID, stock.FiscalYearID).Count(&count)
+	if count > 0 {
+		return errors.New("cannot delete: stock is referenced by resource requests")
+	}
+	s.db.Model(&models.Transaction{}).Where("resource_item_id = ? AND fiscal_year_id = ?", stock.ResourceItemID, stock.FiscalYearID).Count(&count)
+	if count > 0 {
+		return errors.New("cannot delete: stock is referenced by financial transactions")
+	}
+	return s.db.Delete(&stock).Error
 }

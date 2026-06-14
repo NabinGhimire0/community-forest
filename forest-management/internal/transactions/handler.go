@@ -4,6 +4,7 @@ import (
 	"strconv"
 
 	"forest-management/pkg/middleware"
+	"forest-management/pkg/requestutil"
 	"forest-management/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -18,8 +19,7 @@ func NewTransactionHandler(service *TransactionService) *TransactionHandler {
 }
 
 func (h *TransactionHandler) List(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
+	page, perPage := requestutil.Pagination(c)
 	fiscalYearID := c.Query("fiscal_year_id")
 	txnType := c.Query("type")
 	memberID := c.Query("member_id")
@@ -68,8 +68,7 @@ func (h *TransactionHandler) Summary(c *gin.Context) {
 
 func (h *TransactionHandler) MyTransactions(c *gin.Context) {
 	userID := middleware.GetUserID(c)
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
+	page, perPage := requestutil.Pagination(c)
 
 	txns, meta, err := h.service.GetMemberTransactions(userID, page, perPage)
 	if err != nil {

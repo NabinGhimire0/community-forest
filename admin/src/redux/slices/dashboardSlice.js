@@ -1,4 +1,4 @@
-import { createSlice, createAsyncThunk } from "@reduxjs/toolkit";
+import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import { api } from "../../services/api";
 
 export const fetchDashboard = createAsyncThunk(
@@ -7,9 +7,9 @@ export const fetchDashboard = createAsyncThunk(
     try {
       const response = await api.getDashboard();
       if (response.success) return response.data;
-      return rejectWithValue(response.message);
+      return rejectWithValue(response.message || "Failed to load dashboard");
     } catch (error) {
-      return rejectWithValue(error.message);
+      return rejectWithValue(error.message || "Failed to load dashboard");
     }
   },
 );
@@ -20,9 +20,9 @@ export const fetchDashboardCharts = createAsyncThunk(
     try {
       const response = await api.getDashboardCharts();
       if (response.success) return response.data;
-      return rejectWithValue(response.message);
+      return rejectWithValue(response.message || "Failed to load dashboard charts");
     } catch (error) {
-      return rejectWithValue(error.message);
+      return rejectWithValue(error.message || "Failed to load dashboard charts");
     }
   },
 );
@@ -32,37 +32,45 @@ const dashboardSlice = createSlice({
   initialState: {
     data: null,
     charts: null,
-    isLoading: false,
+    dataStatus: "idle",
+    chartStatus: "idle",
     error: null,
   },
-  reducers: {},
+  reducers: {
+    clearDashboard(state) {
+      state.data = null;
+      state.charts = null;
+      state.dataStatus = "idle";
+      state.chartStatus = "idle";
+      state.error = null;
+    },
+  },
   extraReducers: (builder) => {
     builder
-      // Dashboard data
       .addCase(fetchDashboard.pending, (state) => {
-        state.isLoading = true;
+        state.dataStatus = "loading";
         state.error = null;
       })
       .addCase(fetchDashboard.fulfilled, (state, action) => {
-        state.isLoading = false;
+        state.dataStatus = "succeeded";
         state.data = action.payload;
       })
       .addCase(fetchDashboard.rejected, (state, action) => {
-        state.isLoading = false;
+        state.dataStatus = "failed";
         state.error = action.payload;
       })
-      // Dashboard charts
       .addCase(fetchDashboardCharts.pending, (state) => {
-        state.isLoading = true;
+        state.chartStatus = "loading";
       })
       .addCase(fetchDashboardCharts.fulfilled, (state, action) => {
-        state.isLoading = false;
+        state.chartStatus = "succeeded";
         state.charts = action.payload;
       })
       .addCase(fetchDashboardCharts.rejected, (state) => {
-        state.isLoading = false;
+        state.chartStatus = "failed";
       });
   },
 });
 
+export const { clearDashboard } = dashboardSlice.actions;
 export default dashboardSlice.reducer;

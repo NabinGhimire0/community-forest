@@ -34,7 +34,11 @@ func (h *UploadHandler) Upload(c *gin.Context) {
 	entity := c.PostForm("entity")
 	var entityID *uint
 	if eid := c.PostForm("entity_id"); eid != "" {
-		id, _ := strconv.Atoi(eid)
+		id, err := strconv.ParseUint(eid, 10, 64)
+		if err != nil || id == 0 {
+			response.BadRequest(c, "Invalid entity_id")
+			return
+		}
 		entityID = uintPtr(uint(id))
 	}
 
@@ -45,7 +49,7 @@ func (h *UploadHandler) Upload(c *gin.Context) {
 
 	upload, err := h.service.UploadFile(file, header.Filename, header.Header.Get("Content-Type"), header.Size, folder, userID, entityPtr, entityID)
 	if err != nil {
-		response.Error(c, 500, err.Error())
+		response.BadRequest(c, err.Error())
 		return
 	}
 
@@ -67,7 +71,11 @@ func (h *UploadHandler) UploadMultiple(c *gin.Context) {
 	entity := c.PostForm("entity")
 	var entityID *uint
 	if eid := c.PostForm("entity_id"); eid != "" {
-		id, _ := strconv.Atoi(eid)
+		id, err := strconv.ParseUint(eid, 10, 64)
+		if err != nil || id == 0 {
+			response.BadRequest(c, "Invalid entity_id")
+			return
+		}
 		entityID = uintPtr(uint(id))
 	}
 
@@ -135,18 +143,16 @@ func (h *UploadHandler) Delete(c *gin.Context) {
 	response.Success(c, "File deleted", nil)
 }
 
-// ServeFile — Serve a file for viewing/download
+// ServeFile redirects legacy API file URLs to the centralized, ownership-aware
+// private file route. Authentication cookies and CSRF are not exposed in URLs.
 func (h *UploadHandler) ServeFile(c *gin.Context) {
 	folder := c.Param("folder")
 	filename := c.Param("filename")
-
-	filePath, err := h.service.GetFilePath(folder, filename)
-	if err != nil {
+	if _, err := h.service.GetFilePath(folder, filename); err != nil {
 		response.NotFound(c, "File not found")
 		return
 	}
-
-	c.File(filePath)
+	c.Redirect(307, "/uploads/"+folder+"/"+filename)
 }
 
 func uintPtr(u uint) *uint {

@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion as Motion, AnimatePresence } from "framer-motion";
 import { X, CheckCircle, AlertCircle, Info, AlertTriangle } from "lucide-react";
 import { cn } from "../../utils/helpers";
 
@@ -47,7 +47,7 @@ export function ToastProvider({ children }) {
       <div className="fixed top-4 right-4 z-100 flex flex-col gap-2 max-w-sm">
         <AnimatePresence>
           {toasts.map((toast) => (
-            <motion.div
+            <Motion.div
               key={toast.id}
               initial={{ opacity: 0, x: 100 }}
               animate={{ opacity: 1, x: 0 }}
@@ -65,7 +65,7 @@ export function ToastProvider({ children }) {
               >
                 <X size={14} />
               </button>
-            </motion.div>
+            </Motion.div>
           ))}
         </AnimatePresence>
       </div>

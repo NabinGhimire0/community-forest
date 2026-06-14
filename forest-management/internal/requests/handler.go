@@ -1,9 +1,12 @@
 package requests
 
 import (
+	"errors"
 	"strconv"
 
+	"forest-management/internal/audit"
 	"forest-management/pkg/middleware"
+	"forest-management/pkg/requestutil"
 	"forest-management/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -45,16 +48,21 @@ func (h *RequestHandler) Create(c *gin.Context) {
 
 	request, err := h.service.CreateRequest(userID, req)
 	if err != nil {
+		if errors.Is(err, ErrNoActiveFiscalYear) || errors.Is(err, ErrMemberActiveYearOnly) {
+			response.BadRequest(c, err.Error())
+			return
+		}
 		response.Error(c, 500, err.Error())
 		return
 	}
 
+	actorID := middleware.GetUserID(c)
+	audit.CreateAuditEntry(h.service.db, &actorID, "create", "request", &request.ID, nil, request, c.ClientIP(), c.Request.UserAgent(), "Resource request submitted")
 	response.Created(c, "Request submitted successfully", request)
 }
 
 func (h *RequestHandler) List(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
+	page, perPage := requestutil.Pagination(c)
 	status := c.Query("status")
 	fiscalYearID := c.Query("fiscal_year_id")
 	memberID := c.Query("member_id")
@@ -76,7 +84,9 @@ func (h *RequestHandler) GetByID(c *gin.Context) {
 		return
 	}
 
-	req, err := h.service.GetRequestByID(uint(id))
+	userID := middleware.GetUserID(c)
+	role := middleware.GetUserRole(c)
+	req, err := h.service.GetRequestByID(uint(id), userID, role)
 	if err != nil {
 		response.NotFound(c, "Request not found")
 		return
@@ -87,8 +97,7 @@ func (h *RequestHandler) GetByID(c *gin.Context) {
 
 func (h *RequestHandler) MyRequests(c *gin.Context) {
 	userID := middleware.GetUserID(c)
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
+	page, perPage := requestutil.Pagination(c)
 	status := c.Query("status")
 
 	requests, meta, err := h.service.GetMemberRequests(userID, page, perPage, status)
@@ -120,6 +129,8 @@ func (h *RequestHandler) Approve(c *gin.Context) {
 		return
 	}
 
+	actorID := middleware.GetUserID(c)
+	audit.CreateAuditEntry(h.service.db, &actorID, "approve", "request", &request.ID, nil, request, c.ClientIP(), c.Request.UserAgent(), "Administrator approved resource request and reserved stock")
 	response.Success(c, "Request approved successfully", request)
 }
 
@@ -143,6 +154,8 @@ func (h *RequestHandler) Reject(c *gin.Context) {
 		return
 	}
 
+	actorID := middleware.GetUserID(c)
+	audit.CreateAuditEntry(h.service.db, &actorID, "reject", "request", &request.ID, nil, request, c.ClientIP(), c.Request.UserAgent(), "Administrator rejected resource request")
 	response.Success(c, "Request rejected", request)
 }
 

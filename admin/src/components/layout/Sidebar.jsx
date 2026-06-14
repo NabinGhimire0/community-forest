@@ -1,45 +1,81 @@
 import { useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
-import { useSelector, useDispatch } from "react-redux";
-import { motion, AnimatePresence } from "framer-motion";
+import { useDispatch, useSelector } from "react-redux";
+import { AnimatePresence, motion as Motion } from "framer-motion";
 import {
-  TreePine,
-  LayoutDashboard,
-  Users,
-  FileText,
-  CreditCard,
-  ArrowLeftRight,
-  Receipt,
   AlertTriangle,
-  Mail,
-  Settings,
-  Package,
-  Calendar,
+  ArrowLeftRight,
   BarChart3,
+  Calendar,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  CreditCard,
+  FileText,
+  LayoutDashboard,
   LogOut,
+  Mail,
+  Package,
+  Receipt,
+  Settings,
+  DatabaseBackup,
+  TreePine,
+  Users,
+  UserRound,
   X,
 } from "lucide-react";
-import { cn } from "../../utils/helpers";
 import { logout } from "../../redux/slices/authSlice";
+import { cn, getImageUrl, getRoleLabel } from "../../utils/helpers";
 
-const navGroups = [
+const groupDefinitions = [
   {
     label: "Overview",
-    items: [{ path: "/dashboard", label: "Dashboard", icon: LayoutDashboard }],
+    items: [
+      {
+        path: "/dashboard",
+        label: "Dashboard",
+        memberLabel: "My Dashboard",
+        icon: LayoutDashboard,
+        roles: ["admin", "staff", "member"],
+      },
+      {
+        path: "/profile",
+        label: "My Profile",
+        icon: UserRound,
+        roles: ["admin", "staff", "member"],
+      },
+    ],
   },
   {
-    label: "Management",
+    label: "Member Services",
     items: [
       {
         path: "/members",
-        label: "Members",
+        label: "Member Register",
         icon: Users,
         roles: ["admin", "staff"],
       },
-      { path: "/requests", label: "Requests", icon: FileText },
-      { path: "/payments", label: "Payments", icon: CreditCard },
-      { path: "/transactions", label: "Transactions", icon: ArrowLeftRight },
+      {
+        path: "/requests",
+        label: "Requests",
+        memberLabel: "My Requests",
+        icon: FileText,
+        roles: ["admin", "staff", "member"],
+      },
+      {
+        path: "/payments",
+        label: "Payments",
+        memberLabel: "My Payments",
+        icon: CreditCard,
+        roles: ["admin", "staff", "member"],
+      },
+      {
+        path: "/transactions",
+        label: "Transactions",
+        memberLabel: "My Ledger",
+        icon: ArrowLeftRight,
+        roles: ["admin", "staff", "member"],
+      },
     ],
   },
   {
@@ -60,7 +96,7 @@ const navGroups = [
     ],
   },
   {
-    label: "Communication",
+    label: "Operations",
     items: [
       {
         path: "/letters",
@@ -68,20 +104,9 @@ const navGroups = [
         icon: Mail,
         roles: ["admin", "staff"],
       },
-    ],
-  },
-  {
-    label: "Administration",
-    items: [
-      {
-        path: "/samiti",
-        label: "Samiti Settings",
-        icon: Settings,
-        roles: ["admin"],
-      },
       {
         path: "/resources",
-        label: "Resources",
+        label: "Resources & Stock",
         icon: Package,
         roles: ["admin", "staff"],
       },
@@ -97,47 +122,73 @@ const navGroups = [
         icon: BarChart3,
         roles: ["admin", "staff"],
       },
+      {
+        path: "/system-data",
+        label: "Exports & Backups",
+        icon: DatabaseBackup,
+        roles: ["admin"],
+      },
+      {
+        path: "/samiti",
+        label: "Organization Settings",
+        icon: Settings,
+        roles: ["admin"],
+      },
     ],
   },
 ];
 
-export default function Sidebar({ isOpen, onClose, collapsed }) {
+export default function Sidebar({
+  isOpen,
+  onClose,
+  collapsed,
+  onToggleCollapse,
+}) {
   const dispatch = useDispatch();
   const navigate = useNavigate();
-  const { user } = useSelector((state) => state.auth);
+  const user = useSelector((state) => state.auth.user);
+  const settings = useSelector((state) => state.appSettings.settings);
   const [expandedGroups, setExpandedGroups] = useState({
     Overview: true,
-    Management: true,
+    "Member Services": true,
     Finance: true,
-    Communication: true,
-    Administration: true,
+    Operations: true,
   });
 
-  const toggleGroup = (label) =>
-    setExpandedGroups((prev) => ({ ...prev, [label]: !prev[label] }));
-  const handleLogout = () => {
-    dispatch(logout());
-    navigate("/login");
-  };
-
-  const filteredGroups = navGroups
+  const role = user?.role;
+  const groups = groupDefinitions
     .map((group) => ({
       ...group,
-      items: group.items.filter(
-        (item) => !item.roles || (user && item.roles.includes(user.role)),
-      ),
+      items: group.items
+        .filter((item) => item.roles.includes(role))
+        .map((item) => ({
+          ...item,
+          displayLabel:
+            role === "member" && item.memberLabel
+              ? item.memberLabel
+              : item.label,
+        })),
     }))
     .filter((group) => group.items.length > 0);
+
+  const handleLogout = async () => {
+    await dispatch(logout());
+    navigate("/login", { replace: true });
+  };
+
+  const logoUrl = getImageUrl(settings?.logo);
 
   return (
     <>
       <AnimatePresence>
         {isOpen && (
-          <motion.div
+          <Motion.button
+            type="button"
+            aria-label="Close navigation"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/50 z-40 lg:hidden"
+            className="fixed inset-0 z-40 bg-slate-950/55 backdrop-blur-sm lg:hidden"
             onClick={onClose}
           />
         )}
@@ -145,125 +196,165 @@ export default function Sidebar({ isOpen, onClose, collapsed }) {
 
       <aside
         className={cn(
-          "fixed left-0 top-0 z-50 h-full bg-white/70 dark:bg-[#0B1120]/70 backdrop-blur-xl border-r border-gray-200/50 dark:border-white/5 transition-all duration-300 flex flex-col shadow-[4px_0_24px_rgba(0,0,0,0.02)]",
-          collapsed ? "w-17" : "w-65",
+          "fixed inset-y-0 left-0 z-50 flex flex-col border-r border-slate-200/70 bg-white/90 shadow-xl shadow-slate-950/5 backdrop-blur-xl transition-all duration-300 dark:border-white/10 dark:bg-slate-950/90",
+          collapsed ? "w-19" : "w-69",
           isOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0",
         )}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between h-16 px-4 border-b border-gray-200 dark:border-white/10">
-          <div
-            className={cn(
-              "flex items-center gap-3 overflow-hidden",
-              collapsed && "justify-center",
+        <div className="relative flex min-h-20 items-center gap-3 border-b border-slate-200/70 px-4 dark:border-white/10">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+            {logoUrl ? (
+              <img
+                src={logoUrl}
+                alt="Organization logo"
+                className="h-10 w-10 shrink-0 rounded-xl border border-emerald-100 bg-white object-contain p-1 dark:border-emerald-900/50"
+              />
+            ) : (
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-linear-to-br from-emerald-500 to-teal-700 text-white shadow-lg shadow-emerald-500/20">
+                <TreePine size={21} />
+              </div>
             )}
-          >
-            <div className="shrink-0 w-8 h-8 rounded-lg bg-emerald-600 flex items-center justify-center">
-              <TreePine size={18} className="text-white" />
-            </div>
+
             {!collapsed && (
-              <div className="overflow-hidden whitespace-nowrap">
-                <h1 className="text-sm font-bold text-gray-900 dark:text-gray-100">
-                  श्री पाञ्चकन्या सामुदायिक वन उपभोक्ता समूह
+              <div className="min-w-0">
+                <h1 className="line-clamp-2 text-sm font-bold leading-5 text-slate-900 dark:text-white">
+                  {settings?.name}
                 </h1>
-                <p className="text-[10px] text-gray-400">Community Forestry</p>
+                <p className="mt-0.5 truncate text-[11px] font-medium text-emerald-700 dark:text-emerald-400">
+                  Community Forestry Portal
+                </p>
               </div>
             )}
           </div>
+
           <button
+            type="button"
             onClick={onClose}
-            className="lg:hidden p-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-400"
+            className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 lg:hidden dark:hover:bg-white/5"
+            aria-label="Close menu"
           >
             <X size={18} />
           </button>
         </div>
 
-        {/* Nav */}
-        <nav className="flex-1 overflow-y-auto py-4 px-3 space-y-1">
-          {filteredGroups.map((group) => (
-            <div key={group.label} className="mb-2">
-              {!collapsed && (
-                <button
-                  onClick={() => toggleGroup(group.label)}
-                  className="flex items-center justify-between w-full px-2 py-1.5 text-[11px] font-semibold text-gray-400 uppercase tracking-wider hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
-                >
-                  {group.label}
-                  <ChevronDown
-                    size={14}
-                    className={cn(
-                      "transition-transform",
-                      expandedGroups[group.label] && "rotate-180",
-                    )}
-                  />
-                </button>
-              )}
-              <AnimatePresence>
-                {(expandedGroups[group.label] || collapsed) && (
-                  <motion.div
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: "auto", opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    transition={{ duration: 0.2 }}
-                    className="overflow-hidden"
+        <nav className="flex-1 space-y-2 overflow-y-auto px-3 py-4">
+          {groups.map((group) => {
+            const isExpanded = expandedGroups[group.label];
+            return (
+              <div key={group.label}>
+                {!collapsed && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExpandedGroups((previous) => ({
+                        ...previous,
+                        [group.label]: !previous[group.label],
+                      }))
+                    }
+                    className="mb-1 flex w-full items-center justify-between rounded-lg px-3 py-2 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400 hover:bg-slate-50 hover:text-slate-600 dark:hover:bg-white/5 dark:hover:text-slate-300"
                   >
-                    {group.items.map((item) => (
-                      <NavLink
-                        key={item.path}
-                        to={item.path}
-                        onClick={onClose}
-                        className={({ isActive }) =>
-                          cn(
-                            "flex items-center gap-3 w-full px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-300 relative group overflow-hidden",
-                            isActive
-                              ? "bg-linear-to-r from-emerald-50 to-teal-50/50 text-emerald-700 dark:from-emerald-900/40 dark:to-teal-900/20 dark:text-emerald-300 shadow-sm"
-                              : "text-gray-500 hover:bg-white/60 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/5 dark:hover:text-gray-100",
-                            collapsed && "justify-center px-2",
-                          )
-                        }
-                        title={collapsed ? item.label : undefined}
-                      >
-                        <item.icon size={20} className="shrink-0" />
-                        {!collapsed && <span>{item.label}</span>}
-                      </NavLink>
-                    ))}
-                  </motion.div>
+                    {group.label}
+                    <ChevronDown
+                      size={13}
+                      className={cn(
+                        "transition-transform",
+                        isExpanded && "rotate-180",
+                      )}
+                    />
+                  </button>
                 )}
-              </AnimatePresence>
-            </div>
-          ))}
+
+                <AnimatePresence initial={false}>
+                  {(collapsed || isExpanded) && (
+                    <Motion.div
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: "auto", opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      className="space-y-1 overflow-hidden"
+                    >
+                      {group.items.map((item) => (
+                        <NavLink
+                          key={item.path}
+                          to={item.path}
+                          onClick={onClose}
+                          title={collapsed ? item.displayLabel : undefined}
+                          className={({ isActive }) =>
+                            cn(
+                              "group flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-semibold transition-all",
+                              collapsed && "justify-center px-2",
+                              isActive
+                                ? "bg-emerald-600 text-white shadow-md shadow-emerald-600/20"
+                                : "text-slate-600 hover:bg-emerald-50 hover:text-emerald-800 dark:text-slate-400 dark:hover:bg-emerald-950/40 dark:hover:text-emerald-300",
+                            )
+                          }
+                        >
+                          <item.icon size={19} className="shrink-0" />
+                          {!collapsed && (
+                            <span className="truncate">{item.displayLabel}</span>
+                          )}
+                        </NavLink>
+                      ))}
+                    </Motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            );
+          })}
         </nav>
 
-        {/* User */}
-        <div className="border-t border-gray-200 dark:border-white/10 p-3">
+        <div className="border-t border-slate-200/70 p-3 dark:border-white/10">
           <div
             className={cn(
-              "flex items-center gap-3",
+              "flex items-center gap-3 rounded-xl bg-slate-50 p-2.5 dark:bg-white/5",
               collapsed && "justify-center",
             )}
           >
-            <div className="w-8 h-8 rounded-full bg-emerald-50 dark:bg-emerald-900/20 flex items-center justify-center shrink-0">
-              <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-400">
-                {user?.name?.charAt(0).toUpperCase() || "?"}
-              </span>
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-100 font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+              {user?.name?.charAt(0)?.toUpperCase() || "?"}
             </div>
             {!collapsed && (
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-semibold text-slate-900 dark:text-white">
                   {user?.name}
                 </p>
-                <p className="text-[11px] text-gray-400 capitalize">
-                  {user?.role}
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  {getRoleLabel(role)}
                 </p>
               </div>
             )}
-            <button
-              onClick={handleLogout}
-              className="p-1.5 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-400 hover:text-red-500 transition-colors"
-              title="Logout"
-            >
-              <LogOut size={16} />
-            </button>
+            {!collapsed && (
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+                title="Sign out"
+                aria-label="Sign out"
+              >
+                <LogOut size={17} />
+              </button>
+            )}
           </div>
+
+          <button
+            type="button"
+            onClick={onToggleCollapse}
+            className="mt-2 hidden w-full items-center justify-center gap-2 rounded-lg py-2 text-xs font-semibold text-slate-500 hover:bg-slate-100 hover:text-slate-800 lg:flex dark:hover:bg-white/5 dark:hover:text-white"
+          >
+            {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+            {!collapsed && "Collapse sidebar"}
+          </button>
+
+          {collapsed && (
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="mt-1 hidden w-full items-center justify-center rounded-lg py-2 text-slate-400 hover:bg-red-50 hover:text-red-600 lg:flex dark:hover:bg-red-950/40"
+              title="Sign out"
+              aria-label="Sign out"
+            >
+              <LogOut size={18} />
+            </button>
+          )}
         </div>
       </aside>
     </>

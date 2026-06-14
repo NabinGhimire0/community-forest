@@ -10,21 +10,18 @@ import (
 	"time"
 
 	"forest-management/internal/models"
+	"forest-management/pkg/security"
 	"forest-management/pkg/utils"
 
 	"gorm.io/gorm"
 )
 
 type BulkImportService struct {
-	db  *gorm.DB
-	sms utils.SMSService
+	db *gorm.DB
 }
 
 func NewBulkImportService(db *gorm.DB) *BulkImportService {
-	return &BulkImportService{
-		db:  db,
-		sms: utils.GetSMSService(),
-	}
+	return &BulkImportService{db: db}
 }
 
 type ImportResult struct {
@@ -144,6 +141,11 @@ func (s *BulkImportService) importRow(row []string, headerMap map[string]int) Im
 	if phone == "" {
 		return ImportResult{Name: name, Phone: phone, Status: "error", Error: "phone is required"}
 	}
+	normalizedPhone, err := security.NormalizeNepalMobile(phone)
+	if err != nil {
+		return ImportResult{Name: name, Phone: phone, Status: "error", Error: err.Error()}
+	}
+	phone = normalizedPhone
 	if wardNoStr == "" {
 		return ImportResult{Name: name, Phone: phone, Status: "error", Error: "ward_no is required"}
 	}
@@ -167,8 +169,12 @@ func (s *BulkImportService) importRow(row []string, headerMap map[string]int) Im
 		return ImportResult{Name: name, Phone: phone, Status: "error", Error: "failed to generate membership number"}
 	}
 
-	// Generate password
-	plainPassword := generateRandomPassword(8)
+	// Generate a strong temporary password.
+	plainPassword, err := security.GenerateStrongPassword(16)
+	if err != nil {
+		tx.Rollback()
+		return ImportResult{Name: name, Phone: phone, Status: "error", Error: "failed to generate temporary password"}
+	}
 	hashedPassword, err := utils.HashPassword(plainPassword)
 	if err != nil {
 		tx.Rollback()
@@ -177,11 +183,12 @@ func (s *BulkImportService) importRow(row []string, headerMap map[string]int) Im
 
 	// Create User
 	user := models.User{
-		Name:     name,
-		Phone:    phone,
-		Password: hashedPassword,
-		Role:     "member",
-		Status:   "active",
+		Name:               name,
+		Phone:              phone,
+		Password:           hashedPassword,
+		Role:               "member",
+		Status:             "active",
+		MustChangePassword: true,
 	}
 	if err := tx.Create(&user).Error; err != nil {
 		tx.Rollback()
@@ -226,9 +233,6 @@ func (s *BulkImportService) importRow(row []string, headerMap map[string]int) Im
 		return ImportResult{Name: name, Phone: phone, Status: "error", Error: "failed to commit transaction"}
 	}
 
-	// Send SMS (async)
-	go s.sendCredentialsSMS(phone, plainPassword)
-
 	return ImportResult{
 		Name:         name,
 		Phone:        phone,
@@ -258,16 +262,6 @@ func (s *BulkImportService) generateMembershipNo(tx *gorm.DB) (string, error) {
 	}
 
 	return fmt.Sprintf("MEM-%04d", nextNum), nil
-}
-
-func (s *BulkImportService) sendCredentialsSMS(phone, password string) {
-	message := fmt.Sprintf(
-		"Ban Samiti: Your account has been created.\nPhone: %s\nPassword: %s",
-		phone, password,
-	)
-	if err := s.sms.SendSMS(phone, message); err != nil {
-		fmt.Printf("⚠️ Failed to send SMS to %s: %v\n", phone, err)
-	}
 }
 
 // GenerateCSVTemplate returns a CSV template for bulk import

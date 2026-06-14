@@ -3,6 +3,7 @@ package audit
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"forest-management/internal/models"
@@ -22,21 +23,8 @@ func NewAuditService(db *gorm.DB) *AuditService {
 func (s *AuditService) LogEntry(userID *uint, action, entity string, entityID *uint, oldValues, newValues interface{}, ipAddress, userAgent, remarks string) error {
 	var oldJSON, newJSON *string
 
-	if oldValues != nil {
-		bytes, err := json.Marshal(oldValues)
-		if err == nil {
-			str := string(bytes)
-			oldJSON = &str
-		}
-	}
-
-	if newValues != nil {
-		bytes, err := json.Marshal(newValues)
-		if err == nil {
-			str := string(bytes)
-			newJSON = &str
-		}
-	}
+	oldJSON = safeAuditJSON(oldValues)
+	newJSON = safeAuditJSON(newValues)
 
 	log := models.AuditLog{
 		UserID:    userID,
@@ -52,6 +40,48 @@ func (s *AuditService) LogEntry(userID *uint, action, entity string, entityID *u
 	}
 
 	return s.db.Create(&log).Error
+}
+
+func safeAuditJSON(value interface{}) *string {
+	if value == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var normalized interface{}
+	if err := json.Unmarshal(encoded, &normalized); err != nil {
+		return nil
+	}
+	redactAuditSecrets(normalized)
+	encoded, err = json.Marshal(normalized)
+	if err != nil {
+		return nil
+	}
+	text := string(encoded)
+	return &text
+}
+
+func redactAuditSecrets(value interface{}) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		for key, child := range typed {
+			lower := strings.ToLower(key)
+			if strings.Contains(lower, "password") || strings.Contains(lower, "passphrase") ||
+				strings.Contains(lower, "secret") || strings.Contains(lower, "token") ||
+				strings.Contains(lower, "mfa_code") || strings.Contains(lower, "otp") ||
+				strings.Contains(lower, "backup_code") || strings.Contains(lower, "gateway_response") {
+				typed[key] = "[REDACTED]"
+				continue
+			}
+			redactAuditSecrets(child)
+		}
+	case []interface{}:
+		for _, child := range typed {
+			redactAuditSecrets(child)
+		}
+	}
 }
 
 // ListLogs returns paginated audit logs with filters

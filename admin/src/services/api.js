@@ -1,66 +1,169 @@
-const API_BASE_URL = "/api";
+const API_BASE_URL = (import.meta.env.VITE_API_URL || "/api").replace(/\/$/, "");
+
+export class ApiError extends Error {
+  constructor(message, { status = 0, code = "request_failed", payload = null } = {}) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.payload = payload;
+  }
+}
 
 class ApiClient {
   constructor() {
     this.baseUrl = API_BASE_URL;
+    this.csrfToken = "";
   }
 
-  getToken() {
-    return localStorage.getItem("auth_token");
+  getCookie(name) {
+    const prefix = `${encodeURIComponent(name)}=`;
+    return document.cookie
+      .split(";")
+      .map((value) => value.trim())
+      .find((value) => value.startsWith(prefix))
+      ?.slice(prefix.length) || "";
   }
 
-  setToken(token) {
-    if (token) {
-      localStorage.setItem("auth_token", token);
-    } else {
-      localStorage.removeItem("auth_token");
+  isUnsafeMethod(method = "GET") {
+    return !["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase());
+  }
+
+  getHeaders(body, method = "GET") {
+    const headers = {};
+    if (!(body instanceof FormData) && body != null) {
+      headers["Content-Type"] = "application/json";
     }
-  }
-
-  getHeaders() {
-    const headers = { "Content-Type": "application/json" };
-    const token = this.getToken();
-    if (token) headers["Authorization"] = `Bearer ${token}`;
+    if (this.isUnsafeMethod(method)) {
+      const csrfToken = this.csrfToken || decodeURIComponent(this.getCookie("bansamiti_csrf"));
+      if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
+    }
     return headers;
   }
 
-  async request(endpoint, options = {}) {
+  async fetchResponse(endpoint, options = {}) {
     const url = `${this.baseUrl}${endpoint}`;
-    const response = await fetch(url, {
-      ...options,
-      headers: { ...this.getHeaders(), ...options.headers },
-    });
+    const method = options.method || "GET";
+    let response;
+    try {
+      response = await fetch(url, {
+        ...options,
+        method,
+        credentials: "include",
+        headers: {
+          ...this.getHeaders(options.body, method),
+          ...options.headers,
+        },
+      });
+    } catch {
+      throw new ApiError(
+        "Cannot connect to the server. Make sure the backend is running and the API URL is correct.",
+        { code: "network_error" },
+      );
+    }
+    const refreshedCSRF = response.headers.get("X-CSRF-Token");
+    if (refreshedCSRF) this.csrfToken = refreshedCSRF;
+    return response;
+  }
 
-    if (response.status === 401) {
-      this.setToken(null);
+  async request(endpoint, options = {}) {
+    const response = await this.fetchResponse(endpoint, options);
+    const payload = await response.json().catch(() => null);
+
+    if (response.status === 401 && endpoint !== "/auth/login") {
       window.dispatchEvent(new CustomEvent("auth:unauthorized"));
-      throw new Error("Unauthorized");
     }
-
     if (!response.ok) {
-      const error = await response
-        .json()
-        .catch(() => ({ message: "Request failed" }));
-      throw new Error(error.message || `HTTP ${response.status}`);
+      throw new ApiError(
+        payload?.message || payload?.error || `Request failed with status ${response.status}`,
+        {
+          status: response.status,
+          code: payload?.code || "request_failed",
+          payload,
+        },
+      );
     }
+    return payload;
+  }
 
-    return response.json();
+  async uploadForm(endpoint, formData) {
+    return this.request(endpoint, { method: "POST", body: formData });
+  }
+
+  async requestBlob(endpoint, options = {}) {
+    const response = await this.fetchResponse(endpoint, options);
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new ApiError(
+        payload?.message || payload?.error || `Download failed with status ${response.status}`,
+        { status: response.status, code: payload?.code || "download_failed", payload },
+      );
+    }
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    const normalMatch = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = decodeURIComponent(utf8Match?.[1] || normalMatch?.[1] || "download.bin");
+    return { blob: await response.blob(), filename };
+  }
+
+  saveDownload({ blob, filename }) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  // ==================== Connection ====================
+  async health() {
+    return this.request("/health");
   }
 
   // ==================== Auth ====================
   async login(data) {
-    const result = await this.request("/auth/login", {
+    return this.request("/auth/login", {
       method: "POST",
       body: JSON.stringify(data),
     });
-    if (result.success && result.data?.token) {
-      this.setToken(result.data.token);
+  }
+
+  async logout() {
+    try {
+      return await this.request("/auth/logout", { method: "POST" });
+    } finally {
+      this.csrfToken = "";
     }
-    return result;
   }
 
   async getProfile() {
     return this.request("/auth/profile");
+  }
+
+  async changePassword(data) {
+    return this.request("/auth/change-password", { method: "PUT", body: JSON.stringify(data) });
+  }
+
+  async getSessions() {
+    return this.request("/auth/sessions");
+  }
+
+  async revokeAllSessions() {
+    return this.request("/auth/sessions/revoke-all", { method: "POST" });
+  }
+
+  async beginMFA(currentPassword) {
+    return this.request("/auth/mfa/setup", { method: "POST", body: JSON.stringify({ current_password: currentPassword }) });
+  }
+
+  async enableMFA(code) {
+    return this.request("/auth/mfa/enable", { method: "POST", body: JSON.stringify({ code }) });
+  }
+
+  async disableMFA(currentPassword, code) {
+    return this.request("/auth/mfa/disable", { method: "POST", body: JSON.stringify({ current_password: currentPassword, code }) });
   }
 
   // ==================== Members ====================
@@ -68,11 +171,15 @@ class ApiClient {
     const query = new URLSearchParams(
       Object.entries(params).filter(([, v]) => v != null),
     ).toString();
-    return this.request(`/members?${query}`);
+    return this.request(`/members${query ? `?${query}` : ""}`);
   }
 
   async getMember(id) {
     return this.request(`/members/${id}`);
+  }
+
+  async getMyMemberProfile() {
+    return this.request("/members/profile");
   }
 
   async createMember(data) {
@@ -117,15 +224,13 @@ class ApiClient {
     });
   }
 
-  async resetMemberCredentials(memberId) {
+  async resetMemberCredentials(memberId, security) {
     return this.request(`/members/${memberId}/reset-credentials`, {
       method: "POST",
+      body: JSON.stringify(security),
     });
   }
 
-  async sendMemberSms(memberId) {
-    return this.request(`/members/${memberId}/send-sms`, { method: "POST" });
-  }
 
   // ==================== Requests ====================
   async getRequests(params = {}) {
@@ -184,10 +289,47 @@ class ApiClient {
     return this.request(`/payments/${id}`);
   }
 
-  async createPayment(data) {
-    return this.request("/payments", {
+  async createCashPayment(data) {
+    return this.request("/payments/cash", {
       method: "POST",
       body: JSON.stringify(data),
+    });
+  }
+
+  async initiateEsewaPayment(requestId) {
+    return this.request("/payments/esewa/initiate", {
+      method: "POST",
+      body: JSON.stringify({ request_id: Number(requestId) }),
+    });
+  }
+
+  async initiateEsewaLedgerPayment(ledgerTransactionId) {
+    return this.request("/payments/esewa/initiate", {
+      method: "POST",
+      body: JSON.stringify({
+        ledger_transaction_id: Number(ledgerTransactionId),
+      }),
+    });
+  }
+
+  submitEsewaForm(actionUrl, fields) {
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = actionUrl;
+    Object.entries(fields || {}).forEach(([name, value]) => {
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = name;
+      input.value = String(value);
+      form.appendChild(input);
+    });
+    document.body.appendChild(form);
+    form.submit();
+  }
+
+  async checkEsewaPaymentStatus(paymentId) {
+    return this.request(`/payments/esewa/${paymentId}/check-status`, {
+      method: "POST",
     });
   }
 
@@ -196,13 +338,6 @@ class ApiClient {
       Object.entries(params).filter(([, v]) => v != null),
     ).toString();
     return this.request(`/payments/my${query ? `?${query}` : ""}`);
-  }
-
-  async verifyPayment(id, data) {
-    return this.request(`/payments/${id}/verify`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    });
   }
 
   async getPaymentStats(params = {}) {
@@ -266,32 +401,7 @@ class ApiClient {
   }
 
   async uploadExpenseBillPhoto(id, formData) {
-    const token = this.getToken();
-    const response = await fetch(
-      `${this.baseUrl}/expenses/${id}/upload-photo`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        body: formData,
-      },
-    );
-
-    if (response.status === 401) {
-      this.setToken(null);
-      window.dispatchEvent(new CustomEvent("auth:unauthorized"));
-      throw new Error("Unauthorized");
-    }
-
-    if (!response.ok) {
-      const error = await response
-        .json()
-        .catch(() => ({ message: "Upload failed" }));
-      throw new Error(error.message || `HTTP ${response.status}`);
-    }
-
-    return response.json();
+    return this.uploadForm(`/expenses/${id}/upload-photo`, formData);
   }
 
   // ==================== Expense Categories ====================
@@ -364,29 +474,7 @@ class ApiClient {
   }
 
   async uploadFinePhoto(id, formData) {
-    const token = this.getToken();
-    const response = await fetch(`${this.baseUrl}/fines/${id}/upload-photo`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-      body: formData,
-    });
-
-    if (response.status === 401) {
-      this.setToken(null);
-      window.dispatchEvent(new CustomEvent("auth:unauthorized"));
-      throw new Error("Unauthorized");
-    }
-
-    if (!response.ok) {
-      const error = await response
-        .json()
-        .catch(() => ({ message: "Upload failed" }));
-      throw new Error(error.message || `HTTP ${response.status}`);
-    }
-
-    return response.json();
+    return this.uploadForm(`/fines/${id}/upload-photo`, formData);
   }
 
   // ==================== Letters ====================
@@ -420,32 +508,7 @@ class ApiClient {
   }
 
   async uploadLetterDocument(id, formData) {
-    const token = this.getToken();
-    const response = await fetch(
-      `${this.baseUrl}/letters/${id}/upload-document`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        body: formData,
-      },
-    );
-
-    if (response.status === 401) {
-      this.setToken(null);
-      window.dispatchEvent(new CustomEvent("auth:unauthorized"));
-      throw new Error("Unauthorized");
-    }
-
-    if (!response.ok) {
-      const error = await response
-        .json()
-        .catch(() => ({ message: "Upload failed" }));
-      throw new Error(error.message || `HTTP ${response.status}`);
-    }
-
-    return response.json();
+    return this.uploadForm(`/letters/${id}/upload-document`, formData);
   }
 
   // ==================== Samiti Settings ====================
@@ -461,32 +524,7 @@ class ApiClient {
   }
 
   async uploadSamitiLogo(formData) {
-    const token = this.getToken();
-    const response = await fetch(
-      `${this.baseUrl}/samiti/settings/upload-logo`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        body: formData,
-      },
-    );
-
-    if (response.status === 401) {
-      this.setToken(null);
-      window.dispatchEvent(new CustomEvent("auth:unauthorized"));
-      throw new Error("Unauthorized");
-    }
-
-    if (!response.ok) {
-      const error = await response
-        .json()
-        .catch(() => ({ message: "Upload failed" }));
-      throw new Error(error.message || `HTTP ${response.status}`);
-    }
-
-    return response.json();
+    return this.uploadForm("/samiti/settings/upload-logo", formData);
   }
 
   // ==================== Samiti Heads ====================
@@ -496,6 +534,14 @@ class ApiClient {
 
   async getSamitiHead(id) {
     return this.request(`/samiti/heads/${id}`);
+  }
+
+  async getManagedSamitiHeads() {
+    return this.request("/samiti/manage/heads");
+  }
+
+  async getManagedSamitiHead(id) {
+    return this.request(`/samiti/manage/heads/${id}`);
   }
 
   async createSamitiHead(data) {
@@ -517,32 +563,7 @@ class ApiClient {
   }
 
   async uploadHeadPhoto(id, formData) {
-    const token = this.getToken();
-    const response = await fetch(
-      `${this.baseUrl}/samiti/heads/${id}/upload-photo`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        body: formData,
-      },
-    );
-
-    if (response.status === 401) {
-      this.setToken(null);
-      window.dispatchEvent(new CustomEvent("auth:unauthorized"));
-      throw new Error("Unauthorized");
-    }
-
-    if (!response.ok) {
-      const error = await response
-        .json()
-        .catch(() => ({ message: "Upload failed" }));
-      throw new Error(error.message || `HTTP ${response.status}`);
-    }
-
-    return response.json();
+    return this.uploadForm(`/samiti/heads/${id}/upload-photo`, formData);
   }
 
   // ==================== Resources ====================
@@ -721,6 +742,70 @@ class ApiClient {
   async deleteFeeSetting(id) {
     return this.request(`/fiscal-years/fee/${id}`, { method: "DELETE" });
   }
+  // ==================== Historical ledger ====================
+  async createHistoricalTransaction(memberId, data) {
+    return this.request(`/members/${memberId}/historical-transaction`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async verifyHistoricalTransaction(transactionId) {
+    return this.request(`/members/historical-transactions/${transactionId}/verify`, {
+      method: "POST",
+    });
+  }
+
+  async reverseHistoricalTransaction(transactionId, reason) {
+    return this.request(`/members/historical-transactions/${transactionId}/reverse`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    });
+  }
+
+  async uploadTransactionDocument(transactionId, file) {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("folder", "documents");
+    formData.append("entity", "transaction");
+    formData.append("entity_id", String(transactionId));
+    return this.request("/uploads", { method: "POST", body: formData });
+  }
+
+  async downloadAuthenticated(endpoint, fallbackFilename = "download") {
+    const response = await fetch(`${this.baseUrl}${endpoint}`, {
+      headers: this.getHeaders(null),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new Error(payload?.message || "Download failed");
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("content-disposition") || "";
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || fallbackFilename;
+    const href = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = href;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(href);
+  }
+
+  async downloadPaymentReceipt(paymentId) {
+    return this.downloadAuthenticated(`/receipts/payment/${paymentId}`, `payment-${paymentId}.pdf`);
+  }
+
+  async downloadUploadedFile(file) {
+    if (!file?.file_url) throw new Error("Document is unavailable");
+    const endpoint = file.file_url.startsWith(this.baseUrl)
+      ? file.file_url.slice(this.baseUrl.length)
+      : file.file_url.replace(/^\/api/, "");
+    return this.downloadAuthenticated(endpoint, file.original_name || "document");
+  }
+
   // ==================== Reports ====================
   async getDashboard() {
     return this.request("/reports/dashboard");
@@ -746,61 +831,56 @@ class ApiClient {
 
   // Member Photo Uploads
   async uploadMemberPhoto(memberId, formData) {
-    const token = this.getToken();
-    const response = await fetch(
-      `${this.baseUrl}/members/${memberId}/upload-photo`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        body: formData,
-      },
-    );
-
-    if (response.status === 401) {
-      this.setToken(null);
-      window.dispatchEvent(new CustomEvent("auth:unauthorized"));
-      throw new Error("Unauthorized");
-    }
-
-    if (!response.ok) {
-      const error = await response
-        .json()
-        .catch(() => ({ message: "Upload failed" }));
-      throw new Error(error.message || `HTTP ${response.status}`);
-    }
-
-    return response.json();
+    return this.uploadForm(`/members/${memberId}/upload-photo`, formData);
   }
 
   async uploadAssistantPhoto(memberId, formData) {
-    const token = this.getToken();
-    const response = await fetch(
-      `${this.baseUrl}/members/${memberId}/upload-assistant-photo`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        body: formData,
-      },
-    );
+    return this.uploadForm(`/members/${memberId}/upload-assistant-photo`, formData);
+  }
+  async getMemberFinancialSummary(memberId) {
+    return this.request(`/members/${memberId}/financial-summary`);
+  }
 
-    if (response.status === 401) {
-      this.setToken(null);
-      window.dispatchEvent(new CustomEvent("auth:unauthorized"));
-      throw new Error("Unauthorized");
-    }
+  // Add these to ApiClient class
+  async getMemberFeeDetails(memberId) {
+    return this.request(`/members/${memberId}/fee-details`);
+  }
 
-    if (!response.ok) {
-      const error = await response
-        .json()
-        .catch(() => ({ message: "Upload failed" }));
-      throw new Error(error.message || `HTTP ${response.status}`);
-    }
+  async getMemberSalesDetails(memberId) {
+    return this.request(`/members/${memberId}/sales-details`);
+  }
 
-    return response.json();
+  // ==================== Production data operations (Admin) ====================
+  async getExportDatasets() {
+    return this.request("/admin/system/exports/datasets");
+  }
+
+  async exportDataset(data) {
+    return this.requestBlob("/admin/system/exports/csv", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async exportAllData(data) {
+    return this.requestBlob("/admin/system/exports/all", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async createDatabaseBackup(data) {
+    return this.requestBlob("/admin/system/backups/database", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async createFullBackup(data) {
+    return this.requestBlob("/admin/system/backups/full", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
   }
 }
 

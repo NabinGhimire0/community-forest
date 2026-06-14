@@ -3,7 +3,9 @@ package expenses
 import (
 	"strconv"
 
+	"forest-management/internal/audit"
 	"forest-management/pkg/middleware"
+	"forest-management/pkg/requestutil"
 	"forest-management/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -22,11 +24,11 @@ func NewExpenseHandler(service *ExpenseService) *ExpenseHandler {
 type CreateExpenseInput struct {
 	FiscalYearID  uint    `json:"fiscal_year_id" binding:"required"`
 	CategoryID    uint    `json:"category_id" binding:"required"`
-	Title         string  `json:"title" binding:"required"`
-	Amount        float64 `json:"amount" binding:"required"`
+	Title         string  `json:"title" binding:"required,max=255"`
+	Amount        float64 `json:"amount" binding:"required,gt=0"`
 	ExpenseDate   string  `json:"expense_date" binding:"required"`
 	PaymentMethod string  `json:"payment_method" binding:"required,oneof=cash bank online"`
-	PaidTo        string  `json:"paid_to" binding:"required"`
+	PaidTo        string  `json:"paid_to" binding:"required,max=255"`
 	ReceiptNo     *string `json:"receipt_no"`
 	BillPhoto     *string `json:"bill_photo"`
 	Remarks       *string `json:"remarks"`
@@ -62,12 +64,13 @@ func (h *ExpenseHandler) Create(c *gin.Context) {
 		return
 	}
 
+	actorID := userID
+	audit.CreateAuditEntry(h.service.db, &actorID, "create", "expense", &expense.ID, nil, expense, c.ClientIP(), c.Request.UserAgent(), "Expense recorded")
 	response.Created(c, "Expense recorded successfully", expense)
 }
 
 func (h *ExpenseHandler) List(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
+	page, perPage := requestutil.Pagination(c)
 	fiscalYearID := c.Query("fiscal_year_id")
 	categoryID := c.Query("category_id")
 	search := c.Query("search")
@@ -104,18 +107,22 @@ func (h *ExpenseHandler) Update(c *gin.Context) {
 		return
 	}
 
+	before, _ := h.service.GetExpenseByID(uint(id))
+
 	var input UpdateExpenseInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		response.BadRequest(c, "Invalid expense data")
 		return
 	}
 
-	expense, err := h.service.UpdateExpense(uint(id), input)
+	expense, err := h.service.UpdateExpense(uint(id), middleware.GetUserID(c), input)
 	if err != nil {
 		response.Error(c, 500, err.Error())
 		return
 	}
 
+	actorID := middleware.GetUserID(c)
+	audit.CreateAuditEntry(h.service.db, &actorID, "update", "expense", &expense.ID, before, expense, c.ClientIP(), c.Request.UserAgent(), "Expense updated")
 	response.Success(c, "Expense updated", expense)
 }
 
@@ -126,12 +133,16 @@ func (h *ExpenseHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	if err := h.service.DeleteExpense(uint(id)); err != nil {
+	before, _ := h.service.GetExpenseByID(uint(id))
+	if err := h.service.DeleteExpense(uint(id), middleware.GetUserID(c)); err != nil {
 		response.Error(c, 500, err.Error())
 		return
 	}
 
-	response.Success(c, "Expense deleted", nil)
+	actorID := middleware.GetUserID(c)
+	entityID := uint(id)
+	audit.CreateAuditEntry(h.service.db, &actorID, "archive", "expense", &entityID, before, nil, c.ClientIP(), c.Request.UserAgent(), "Expense archived; financial row preserved")
+	response.Success(c, "Expense archived", nil)
 }
 
 // ==================== Expense Category Handlers ====================

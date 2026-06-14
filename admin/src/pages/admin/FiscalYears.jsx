@@ -34,7 +34,6 @@ import { formatDate } from "../../utils/helpers";
 export default function FiscalYears() {
   const { user } = useSelector((state) => state.auth);
   const { addToast } = useToast();
-  const canEdit = user?.role === "admin" || user?.role === "staff";
   const isAdmin = user?.role === "admin";
 
   const [fiscalYears, setFiscalYears] = useState([]);
@@ -131,7 +130,19 @@ export default function FiscalYears() {
     try {
       const res = await api.activateFiscalYear(id);
       if (res.success) {
-        addToast("Fiscal year activated successfully", "success");
+        const carriedStock = Number(res.data?.carried_stock_items || 0);
+        const carriedRates = Number(res.data?.carried_rate_items || 0);
+        const carriedFees = Number(res.data?.carried_fee_items || 0);
+        const assignedFees = Number(res.data?.assigned_member_fees || 0);
+        const carryMessage =
+          carriedStock + carriedRates + carriedFees > 0
+            ? ` Carried forward ${carriedStock} stock item(s), ${carriedRates} rate(s), and ${carriedFees} fee setting(s).`
+            : " Existing target-year stock, rates and fee settings were kept unchanged.";
+        const assignmentMessage = ` Assigned the annual Gasti fee to ${assignedFees} member(s); existing member/year fees were not repeated.`;
+        addToast(
+          `Fiscal year activated successfully.${carryMessage}${assignmentMessage}`,
+          "success",
+        );
         fetchFiscalYears();
       } else {
         addToast(res.message || "Failed to activate", "error");

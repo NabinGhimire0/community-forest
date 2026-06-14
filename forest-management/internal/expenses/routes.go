@@ -14,7 +14,7 @@ func RegisterExpenseRoutes(router *gin.RouterGroup, handler *ExpenseHandler) {
 		expRoutes.GET("/", middleware.RequireRole("admin", "staff"), handler.List)
 		expRoutes.GET("/:id", middleware.RequireRole("admin", "staff"), handler.GetByID)
 		expRoutes.POST("/", middleware.RequireRole("admin", "staff"), handler.Create)
-		expRoutes.PUT("/:id", middleware.RequireRole("admin", "staff"), handler.Update)
+		expRoutes.PUT("/:id", middleware.RequireRole("admin"), handler.Update)
 		expRoutes.DELETE("/:id", middleware.RequireRole("admin"), handler.Delete)
 		expRoutes.POST("/:id/upload-photo", middleware.RequireRole("admin", "staff"), handler.UploadBillPhoto)
 

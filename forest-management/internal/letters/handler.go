@@ -3,7 +3,9 @@ package letters
 import (
 	"strconv"
 
+	"forest-management/internal/audit"
 	"forest-management/pkg/middleware"
+	"forest-management/pkg/requestutil"
 	"forest-management/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -20,8 +22,8 @@ func NewLetterHandler(service *LetterService) *LetterHandler {
 type CreateLetterInput struct {
 	Type         string  `json:"type" binding:"required,oneof=incoming outgoing"`
 	ReferenceNo  *string `json:"reference_no"`
-	Title        string  `json:"title" binding:"required"`
-	Subject      string  `json:"subject" binding:"required"`
+	Title        string  `json:"title" binding:"required,max=255"`
+	Subject      string  `json:"subject" binding:"required,max=500"`
 	FromParty    *string `json:"from_party"`
 	ToParty      *string `json:"to_party"`
 	LetterDate   string  `json:"letter_date" binding:"required"`
@@ -60,12 +62,13 @@ func (h *LetterHandler) Create(c *gin.Context) {
 		return
 	}
 
+	actorID := userID
+	audit.CreateAuditEntry(h.service.db, &actorID, "create", "letter", &letter.ID, nil, letter, c.ClientIP(), c.Request.UserAgent(), "Official correspondence recorded")
 	response.Created(c, "Letter recorded successfully", letter)
 }
 
 func (h *LetterHandler) List(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
+	page, perPage := requestutil.Pagination(c)
 	letterType := c.Query("type")
 	search := c.Query("search")
 
@@ -102,6 +105,8 @@ func (h *LetterHandler) Update(c *gin.Context) {
 	}
 	userID := middleware.GetUserID(c)
 
+	before, _ := h.service.GetLetterByID(uint(id))
+
 	var input UpdateLetterInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		response.BadRequest(c, "Invalid letter data")
@@ -114,6 +119,8 @@ func (h *LetterHandler) Update(c *gin.Context) {
 		return
 	}
 
+	actorID := userID
+	audit.CreateAuditEntry(h.service.db, &actorID, "update", "letter", &letter.ID, before, letter, c.ClientIP(), c.Request.UserAgent(), "Official correspondence updated")
 	response.Success(c, "Letter updated", letter)
 }
 
@@ -124,12 +131,16 @@ func (h *LetterHandler) Delete(c *gin.Context) {
 		return
 	}
 
+	before, _ := h.service.GetLetterByID(uint(id))
 	if err := h.service.DeleteLetter(uint(id)); err != nil {
 		response.Error(c, 500, err.Error())
 		return
 	}
 
-	response.Success(c, "Letter deleted", nil)
+	actorID := middleware.GetUserID(c)
+	entityID := uint(id)
+	audit.CreateAuditEntry(h.service.db, &actorID, "archive", "letter", &entityID, before, nil, c.ClientIP(), c.Request.UserAgent(), "Official correspondence archived; document preserved")
+	response.Success(c, "Letter archived", nil)
 }
 
 // UploadDocument handles file upload for letter documents

@@ -3,7 +3,7 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme {
-  --font-sans: "Outfit", sans-serif;
+  --font-sans: "Outfit", "Noto Sans Devanagari", sans-serif;
 }
 
 :root {
@@ -20,7 +20,7 @@
 
 * {
   border-color: theme(--color-gray-200);
-  font-family: 'Outfit', sans-serif;
+  font-family: 'Outfit', 'Noto Sans Devanagari', sans-serif;
 }
 .dark * {
   border-color: rgba(255, 255, 255, 0.08);

@@ -37,7 +37,11 @@ import {
 } from "../../components/ui/Table";
 import LoadingSpinner from "../../components/common/LoadingSpinner";
 import { useToast } from "../../components/common/Toast";
-import { formatCurrency, formatDate } from "../../utils/helpers";
+import { formatCurrency, formatDate, getImageUrl } from "../../utils/helpers";
+import {
+  buildFiscalYearOptions,
+  getActiveFiscalYearId,
+} from "../../utils/fiscalYears";
 
 const emptyExpense = {
   fiscal_year_id: "",
@@ -99,7 +103,16 @@ export default function Expenses() {
         api.getFiscalYears(),
       ]);
       if (categoriesRes.success) setCategories(categoriesRes.data || []);
-      if (fiscalYearsRes.success) setFiscalYears(fiscalYearsRes.data || []);
+      if (fiscalYearsRes.success) {
+        const years = fiscalYearsRes.data || [];
+        const activeId = getActiveFiscalYearId(years);
+        setFiscalYears(years);
+        setFiscalYearFilter((current) => current || activeId);
+        setExpenseForm((current) => ({
+          ...current,
+          fiscal_year_id: current.fiscal_year_id || activeId,
+        }));
+      }
     } catch (err) {
       console.error("Failed to fetch master data:", err);
     }
@@ -110,7 +123,7 @@ export default function Expenses() {
     try {
       const res = await api.getExpenses({
         page,
-        limit: 10,
+        per_page: 10,
         search: search || undefined,
         category_id: categoryFilter || undefined,
         fiscal_year_id: fiscalYearFilter || undefined,
@@ -119,7 +132,7 @@ export default function Expenses() {
         setExpenses(res.data || []);
         setTotalPages(res.meta?.total_pages || 1);
       }
-    } catch (err) {
+    } catch (_err) {
       addToast("Failed to load expenses", "error");
     } finally {
       setIsLoading(false);
@@ -136,6 +149,18 @@ export default function Expenses() {
       fetchExpenses();
     }
   }, [fetchExpenses, activeTab]);
+
+  const newExpenseForm = () => ({
+    ...emptyExpense,
+    fiscal_year_id: getActiveFiscalYearId(fiscalYears),
+    expense_date: new Date().toISOString().split("T")[0],
+  });
+
+  const openCreateExpense = () => {
+    setEditingExpense(null);
+    setExpenseForm(newExpenseForm());
+    setShowExpenseModal(true);
+  };
 
   const handleSaveExpense = async () => {
     setSaving(true);
@@ -164,7 +189,7 @@ export default function Expenses() {
         );
         setShowExpenseModal(false);
         setEditingExpense(null);
-        setExpenseForm(emptyExpense);
+        setExpenseForm(newExpenseForm());
         fetchExpenses();
       } else {
         addToast(res.message || "Failed to save", "error");
@@ -332,14 +357,7 @@ export default function Expenses() {
           </Button>
           {canEdit && (
             <Button
-              onClick={() => {
-                setEditingExpense(null);
-                setExpenseForm({
-                  ...emptyExpense,
-                  expense_date: new Date().toISOString().split("T")[0],
-                });
-                setShowExpenseModal(true);
-              }}
+              onClick={openCreateExpense}
             >
               <Plus size={16} /> Add Expense
             </Button>
@@ -417,13 +435,9 @@ export default function Expenses() {
                     setFiscalYearFilter(e.target.value);
                     setPage(1);
                   }}
-                  options={[
-                    { value: "", label: "All Fiscal Years" },
-                    ...fiscalYears.map((fy) => ({
-                      value: String(fy.id),
-                      label: fy.name,
-                    })),
-                  ]}
+                  options={buildFiscalYearOptions(fiscalYears, {
+                    includeAll: true,
+                  })}
                   className="w-40"
                 />
               </div>
@@ -443,7 +457,7 @@ export default function Expenses() {
                     <Button
                       variant="outline"
                       className="mt-4"
-                      onClick={() => setShowExpenseModal(true)}
+                      onClick={openCreateExpense}
                     >
                       <Plus size={14} /> Add your first expense
                     </Button>
@@ -509,32 +523,32 @@ export default function Expenses() {
                                 <Eye size={15} />
                               </Button>
                               {canEdit && (
-                                <>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    onClick={() => openEditExpense(exp)}
-                                    title="Edit"
-                                  >
-                                    <Edit2 size={15} />
-                                  </Button>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    onClick={() =>
-                                      setDeleteTarget({
-                                        type: "expense",
-                                        id: exp.id,
-                                      })
-                                    }
-                                    title="Delete"
-                                  >
-                                    <Trash2
-                                      size={15}
-                                      className="text-red-500"
-                                    />
-                                  </Button>
-                                </>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() => openEditExpense(exp)}
+                                  title="Edit"
+                                >
+                                  <Edit2 size={15} />
+                                </Button>
+                              )}
+                              {isAdmin && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() =>
+                                    setDeleteTarget({
+                                      type: "expense",
+                                      id: exp.id,
+                                    })
+                                  }
+                                  title="Delete"
+                                >
+                                  <Trash2
+                                    size={15}
+                                    className="text-red-500"
+                                  />
+                                </Button>
                               )}
                             </div>
                           </TableCell>
@@ -667,7 +681,7 @@ export default function Expenses() {
         onClose={() => {
           setShowExpenseModal(false);
           setEditingExpense(null);
-          setExpenseForm(emptyExpense);
+          setExpenseForm(newExpenseForm());
         }}
         title={editingExpense ? "Edit Expense" : "Add Expense"}
         size="lg"
@@ -696,10 +710,7 @@ export default function Expenses() {
                   fiscal_year_id: e.target.value,
                 })
               }
-              options={fiscalYears.map((fy) => ({
-                value: String(fy.id),
-                label: fy.name,
-              }))}
+              options={buildFiscalYearOptions(fiscalYears)}
               placeholder="Select fiscal year"
               required
             />
@@ -991,7 +1002,7 @@ export default function Expenses() {
                     </span>
                   </div>
                   <a
-                    href={viewingExpense.bill_photo}
+                    href={getImageUrl(viewingExpense.bill_photo)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-emerald-600 hover:text-emerald-700 text-sm flex items-center gap-1"

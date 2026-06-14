@@ -3,6 +3,7 @@ package audit
 import (
 	"strconv"
 
+	"forest-management/pkg/requestutil"
 	"forest-management/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -18,8 +19,7 @@ func NewAuditHandler(service *AuditService) *AuditHandler {
 
 // List — Admin views audit logs
 func (h *AuditHandler) List(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", "20"))
+	page, perPage := requestutil.Pagination(c)
 	action := c.Query("action")
 	entity := c.Query("entity")
 	userID := c.Query("user_id")

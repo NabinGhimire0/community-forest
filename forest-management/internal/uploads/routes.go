@@ -10,12 +10,10 @@ func RegisterUploadRoutes(router *gin.RouterGroup, handler *UploadHandler) {
 	uploadRoutes := router.Group("/uploads")
 	uploadRoutes.Use(middleware.AuthMiddleware())
 	{
-		uploadRoutes.POST("/", handler.Upload)
-		uploadRoutes.POST("/multiple", handler.UploadMultiple)
-		uploadRoutes.GET("/", handler.List)
+		uploadRoutes.POST("/", middleware.RequireRole("admin", "staff"), handler.Upload)
+		uploadRoutes.POST("/multiple", middleware.RequireRole("admin", "staff"), handler.UploadMultiple)
+		uploadRoutes.GET("/", middleware.RequireRole("admin", "staff"), handler.List)
 		uploadRoutes.DELETE("/:id", middleware.RequireRole("admin"), handler.Delete)
+		uploadRoutes.GET("/files/:folder/:filename", handler.ServeFile)
 	}
-
-	// Public file serving (files are accessed via URL)
-	router.GET("/uploads/files/:folder/:filename", handler.ServeFile)
 }
